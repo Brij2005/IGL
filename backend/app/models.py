@@ -136,8 +136,11 @@ class CameraHealth(Base):
     camera_id = Column(String(36), ForeignKey("cameras.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
     status = Column(String(50), default="UNKNOWN", nullable=False)  # ONLINE, DEGRADED, OFFLINE, UNRELIABLE, UNKNOWN
     last_frame_timestamp = Column(DateTime(timezone=True), nullable=True)
-    fps = Column(Float, default=0.0, nullable=False)
-    latency_ms = Column(Float, default=0.0, nullable=False)
+    # Legacy unmeasured placeholders. Superseded by measured_fps and
+    # frame_latency_ms; they stay NULL until a real measurement exists so no
+    # API or report can present a fabricated zero as an observed value.
+    fps = Column(Float, nullable=True)
+    latency_ms = Column(Float, nullable=True)
     is_frozen = Column(Boolean, default=False, nullable=False)
     is_black = Column(Boolean, default=False, nullable=False)
     image_quality_score = Column(Float, nullable=True)

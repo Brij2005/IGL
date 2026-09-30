@@ -2,7 +2,7 @@
 Camera Management and Health Telemetry API Routes.
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 try:
@@ -61,14 +61,22 @@ def register_camera(
 def list_cameras(
     zone_id: Optional[str] = None,
     active_only: bool = True,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_active_user)
 ):
     """
-    List all cameras filtered by zone or active status.
+    List cameras filtered by zone or active status. The returned stream_url is
+    always sanitized; credentials are never included in a response.
     """
-    cameras = CameraManager.list_cameras(db, zone_id=zone_id, active_only=active_only)
-    return cameras
+    return CameraManager.list_cameras(
+        db,
+        zone_id=zone_id,
+        active_only=active_only,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{camera_id}", response_model=CameraOut)

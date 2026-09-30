@@ -61,5 +61,16 @@ def test_root_health_does_not_claim_online_when_model_is_unconfigured():
     with TestClient(app) as client:
         response = client.get("/")
     assert response.status_code == 200
-    assert response.json()["status"] == "DEGRADED"
-    assert response.json()["model_status"] == "MODEL_NOT_CONFIGURED"
+    payload = response.json()
+    # The process being up is reported as its own state and never as health.
+    assert payload["application"] == "APPLICATION_UP"
+    assert payload["overall_status"] == "DEGRADED"
+    assert payload["model_state"] == "MODEL_NOT_CONFIGURED"
+    assert payload["database"] == "DATABASE_OK"
+    assert payload["migrations"] == "MIGRATIONS_CURRENT"
+    assert payload["camera_state"] == "NO_CAMERA"
+    assert payload["validation_status"] == "NOT_VALIDATED"
+    assert payload["igl_validated"] is False
+    assert payload["measured_performance"] == "NOT_MEASURED_WITHOUT_OBSERVED_FRAMES"
+    assert "MODEL_NOT_CONFIGURED" in payload["degraded_reasons"]
+    assert "status" not in payload

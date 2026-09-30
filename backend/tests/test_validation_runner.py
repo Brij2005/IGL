@@ -125,7 +125,6 @@ def test_report_contains_only_safe_source_identifier_and_no_igl_claim():
     report = run_inference.create_report(
         source=source,
         source_type="RTSP",
-        source_identifier=safe_source_identifier(source),
         model=model,
         reader=None,
         pipeline=None,
@@ -138,6 +137,118 @@ def test_report_contains_only_safe_source_identifier_and_no_igl_claim():
     assert "token=x" not in serialized
     assert report["igl_validated"] is False
     assert report["validation_status"] == "NOT_VALIDATED"
+    assert report["input_provenance"] == "AUTHORIZED_REAL_INPUT"
+    assert "stream_terminal_state" in report["input"]
+
+
+def test_report_assembly_is_complete_at_construction_time():
+    """The report is valid as returned; no caller patches fields in afterwards."""
+    model = UltralyticsModelAdapter(None)
+    report = run_inference.create_report(
+        source="rtsp://camera.invalid/live",
+        source_type="RTSP",
+        model=model,
+        reader=None,
+        pipeline=None,
+        processing_seconds=0,
+        validation_status="NOT_VALIDATED",
+        errors=[],
+        stream_terminal_state="SOURCE_UNAVAILABLE",
+    )
+    assert set(report) == {
+        "generated_at_utc",
+        "input_provenance",
+        "environment",
+        "model",
+        "input",
+        "pipeline",
+        "errors",
+        "validation_status",
+        "igl_validated",
+    }
+    assert report["input"]["source_identifier"] == "rtsp://camera.invalid/live"
+    assert report["input"]["stream_terminal_state"] == "SOURCE_UNAVAILABLE"
+    json.dumps(report)
+
+
+def test_report_refuses_real_input_validated_without_observed_work():
+    model = UltralyticsModelAdapter(None)
+    with pytest.raises(ValueError, match="observed frames"):
+        run_inference.create_report(
+            source="authorized.mp4",
+            source_type="LOCAL_VIDEO",
+            model=model,
+            reader=None,
+            pipeline=None,
+            processing_seconds=1.0,
+            validation_status="REAL_INPUT_VALIDATED",
+            errors=[],
+        )
+    with pytest.raises(ValueError, match="authorized real input"):
+        run_inference.create_report(
+            source="authorized.mp4",
+            source_type="LOCAL_VIDEO",
+            model=model,
+            reader=None,
+            pipeline=None,
+            processing_seconds=1.0,
+            validation_status="REAL_INPUT_VALIDATED",
+            errors=[],
+            input_provenance=run_inference.TEST_FIXTURE,
+        )
+    with pytest.raises(ValueError, match="errors are recorded"):
+        run_inference.create_report(
+            source="authorized.mp4",
+            source_type="LOCAL_VIDEO",
+            model=model,
+            reader=None,
+            pipeline=None,
+            processing_seconds=1.0,
+            validation_status="REAL_INPUT_VALIDATED",
+            errors=["NO_FRAMES_RECEIVED"],
+        )
+    with pytest.raises(ValueError, match="Invalid validation status"):
+        run_inference.create_report(
+            source="authorized.mp4",
+            source_type="LOCAL_VIDEO",
+            model=model,
+            reader=None,
+            pipeline=None,
+            processing_seconds=1.0,
+            validation_status="ALMOST_VALIDATED",
+            errors=[],
+        )
+
+
+def test_blocked_report_records_reason_without_claiming_pipeline_work(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "MODEL_WEIGHTS_PATH", None)
+    report_path = tmp_path / "blocked-report.json"
+    model = run_inference.build_model_adapter()
+    report = run_inference.create_blocked_report(
+        source="rtsp://camera.invalid/live",
+        source_type="RTSP",
+        model=model,
+        reason="MODEL_NOT_CONFIGURED",
+    )
+    assert report["validation_status"] == "NOT_VALIDATED"
+    assert report["pipeline"]["frames_processed"] == 0
+    assert report["pipeline"]["inferences_completed"] == 0
+    assert report["errors"]["pipeline_errors"] == ["MODEL_NOT_CONFIGURED"]
+    assert report["input"]["stream_terminal_state"] == "NOT_STARTED"
+
+    exit_code, report, error = run_inference.run_validation(
+        "rtsp://camera.invalid/live",
+        "RTSP",
+        model,
+        5.0,
+        report_path,
+    )
+    assert exit_code == 2
+    assert error == "MODEL_NOT_CONFIGURED"
+    assert report_path.is_file()
+    written = json.loads(report_path.read_text(encoding="utf-8"))
+    assert written["validation_status"] == "NOT_VALIDATED"
+    assert written["igl_validated"] is False
 
 
 def test_successful_report_assembly_uses_test_doubles_only(monkeypatch, tmp_path):
@@ -206,15 +317,99 @@ def test_successful_report_assembly_uses_test_doubles_only(monkeypatch, tmp_path
     report_path = tmp_path / "controlled-test-report.json"
 
     exit_code, report, error = run_inference.run_validation(
-        "authorized-test-input.mp4",
+        "test-fixture-input.mp4",
         "LOCAL_VIDEO",
         TestModel(),
         None,
         report_path,
+        run_inference.TEST_FIXTURE,
     )
 
     assert exit_code == 0
     assert error is None
-    assert report["validation_status"] == "REAL_INPUT_VALIDATED"
+    # A clean run of test doubles is a test execution, never real-input validation.
+    assert report["validation_status"] == "TEST_FIXTURE_EXECUTION"
+    assert report["input_provenance"] == "TEST_FIXTURE"
     assert report["igl_validated"] is False
+    assert report["input"]["stream_terminal_state"] == "END_OF_FILE"
     assert report_path.is_file()
+    assert json.loads(report_path.read_text(encoding="utf-8"))["validation_status"] == "TEST_FIXTURE_EXECUTION"
+
+
+def test_failed_fixture_run_is_reported_as_not_validated(monkeypatch, tmp_path):
+    class StalledReader:
+        def __init__(self, *args):
+            self.total_frames_read = 0
+            self.dropped_frames_count = 0
+            self.source_resolution = None
+            self.source_fps = None
+            self.source_duration_seconds = None
+            self._has_connected = False
+            self.first_frame_timestamp = None
+            self.last_frame_timestamp = None
+            self.last_error = "Failed to open configured video source"
+            self.status = "SOURCE_UNAVAILABLE"
+            self.reconnects = 0
+            self._running = False
+            self._thread = threading.Thread(target=lambda: None)
+
+        def start(self):
+            return None
+
+    class IdlePipeline:
+        def __init__(self, *args):
+            self._running = False
+            self._thread = threading.Thread(target=lambda: None)
+            self.tracker = SimpleNamespace(metrics=lambda: {
+                "unique_track_count": 0,
+                "lifecycle_transitions": {},
+            })
+
+        def start(self, reader):
+            return None
+
+        @staticmethod
+        def status():
+            return {
+                "frames_seen": 0,
+                "inferences_completed": 0,
+                "inference_failures": 0,
+                "tracking_failures": 0,
+                "detection_count": 0,
+                "last_error_type": None,
+            }
+
+    model = UltralyticsModelAdapter(None)
+    monkeypatch.setattr(run_inference, "validate_model_configuration", lambda adapter: None)
+    monkeypatch.setattr(run_inference, "StreamReader", StalledReader)
+    monkeypatch.setattr(run_inference, "CameraInferencePipeline", IdlePipeline)
+    report_path = tmp_path / "stalled-fixture-report.json"
+
+    exit_code, report, error = run_inference.run_validation(
+        "test-fixture-input.mp4",
+        "LOCAL_VIDEO",
+        model,
+        None,
+        report_path,
+        run_inference.TEST_FIXTURE,
+    )
+
+    assert exit_code == 1
+    assert error is None
+    assert report["validation_status"] == "NOT_VALIDATED"
+    assert "NO_FRAMES_RECEIVED" in report["errors"]["pipeline_errors"]
+    assert "NO_INFERENCE_COMPLETED" in report["errors"]["pipeline_errors"]
+    assert report["pipeline"]["inferences_completed"] == 0
+    assert report["igl_validated"] is False
+
+
+def test_run_validation_rejects_unknown_input_provenance(tmp_path):
+    with pytest.raises(ValueError, match="Invalid input provenance"):
+        run_inference.run_validation(
+            "test-fixture-input.mp4",
+            "LOCAL_VIDEO",
+            UltralyticsModelAdapter(None),
+            None,
+            tmp_path / "unused.json",
+            "SYNTHETIC_LOOKING_DATA",
+        )

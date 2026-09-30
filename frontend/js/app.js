@@ -93,11 +93,14 @@ function stateRows(items) {
 
 function statusBanner(health, summary) {
   const status = health?.overall_status || "NOT_AVAILABLE";
-  const model = health?.model?.status || "MODEL_NOT_CONFIGURED";
+  const model = health?.model_state || "MODEL_NOT_CONFIGURED";
   const validation = health?.validation_status || "NOT_VALIDATED";
   const message = summary?.data_status === "NO_DATA" ? "No operational records are available yet." : "Values shown are current backend records only.";
-  const dot = status === "ONLINE" ? "dot-green" : status === "DEGRADED" ? "dot-amber" : "dot-muted";
-  return `<div class="status-banner"><div><strong><span class="status-dot ${dot}"></span> ${escapeHtml(status)} · AI ${escapeHtml(model)}</strong><span>${escapeHtml(message)}</span></div><span class="status-pill">VALIDATION ${escapeHtml(validation)}</span></div>`;
+  const dot = status === "OPERATIONAL" ? "dot-green" : status === "DEGRADED" ? "dot-amber" : "dot-muted";
+  const reasons = Array.isArray(health?.degraded_reasons) && health.degraded_reasons.length
+    ? ` Unavailable: ${health.degraded_reasons.join(", ")}.`
+    : "";
+  return `<div class="status-banner"><div><strong><span class="status-dot ${dot}"></span> ${escapeHtml(status)} · MODEL ${escapeHtml(model)}</strong><span>${escapeHtml(message + reasons)}</span></div><span class="status-pill">VALIDATION ${escapeHtml(validation)}</span></div>`;
 }
 
 async function renderOverview() {
@@ -120,11 +123,13 @@ async function renderOverview() {
       <section class="section"><div class="section-head"><h2>Recent recorded events</h2><span>DATABASE RECORDS</span></div>
         ${latest.length ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th>State</th><th>Workflow</th><th>Started</th></tr></thead><tbody>${latest.map(eventRow).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No events recorded.</strong>Nothing is generated to fill this view.</div></div>`}
       </section>
-      <section class="section"><div class="section-head"><h2>Subsystems</h2><span>LIVE API STATE</span></div><div class="section-body">${stateRows([
-        ["API", health.api], ["Database", health.database], ["Migrations", health.migrations],
-        ["Camera monitor", health.camera_health_worker], ["Inference", health.inference_pipeline],
+      <section class="section"><div class="section-head"><h2>Subsystems</h2><span>REPORTED STATE</span></div><div class="section-body">${stateRows([
+        ["Application process", health.application], ["Database", health.database], ["Migrations", health.migrations],
+        ["Cameras", health.camera_state], ["Camera health worker", health.camera_health_worker],
+        ["Inference", health.inference_pipeline], ["Model", health.model_state],
         ["Evidence", health.evidence_subsystem], ["Notifications", health.notification_subsystem],
-        ["Frontend connectivity", health.frontend_connectivity], ["Accuracy", summary.accuracy_metrics_status],
+        ["Frontend connectivity", health.frontend_connectivity], ["Measured performance", health.measured_performance],
+        ["Accuracy", summary.accuracy_metrics_status],
       ])}</div></section>
     </div>`;
   setApiIndicator(health.overall_status, health.overall_status);
@@ -284,9 +289,11 @@ async function renderSystem() {
   const model = health.model || {};
   content.innerHTML = `<div class="status-banner"><div><strong>${escapeHtml(health.overall_status)}</strong><span>Derived from available subsystem checks. This does not imply real-input validation.</span></div><span class="status-pill">${escapeHtml(health.validation_status)}</span></div>
     <div class="content-grid"><section class="section"><div class="section-head"><h2>Subsystem status</h2></div><div class="section-body">${stateRows([
-      ["API", health.api], ["Database", health.database], ["Migrations", health.migrations], ["Camera monitor", health.camera_health_worker],
-      ["Inference pipeline", health.inference_pipeline], ["Model", model.status], ["Evidence", health.evidence_subsystem],
-      ["Notifications", health.notification_subsystem], ["Frontend connectivity", health.frontend_connectivity], ["IGL validated", health.igl_validated],
+      ["Application process", health.application], ["Database", health.database], ["Migrations", health.migrations],
+      ["Cameras", health.camera_state], ["Camera monitor", health.camera_health_worker],
+      ["Inference pipeline", health.inference_pipeline], ["Model", health.model_state], ["Evidence", health.evidence_subsystem],
+      ["Notifications", health.notification_subsystem], ["Frontend connectivity", health.frontend_connectivity],
+      ["Measured performance", health.measured_performance], ["IGL validated", health.igl_validated],
     ])}</div></section><section class="section"><div class="section-head"><h2>Model configuration</h2></div><div class="section-body">${stateRows([
       ["Name", model.model_name], ["Version", model.model_version], ["Classes", model.classes?.length ?? "NOT_AVAILABLE"],
       ["Confidence threshold", model.confidence_threshold], ["Inference count", model.inference_count], ["Average latency", model.average_inference_latency_ms ?? "NOT_MEASURED"],

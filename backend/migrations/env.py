@@ -13,8 +13,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 try:
     from app.database import Base, DATABASE_URL
+    # Importing the model modules registers every table on Base.metadata.
+    # Without this, autogenerate would see an empty target schema against a
+    # fully migrated database and propose dropping every table.
+    import app.models  # noqa: F401
 except ImportError:
     from backend.app.database import Base, DATABASE_URL
+    import backend.app.models  # noqa: F401
+
+from app import models as _models  # noqa: E402,F401
+
+if not Base.metadata.tables:
+    raise RuntimeError(
+        "Alembic target metadata is empty; app models failed to register. "
+        "Refusing to autogenerate against a non-existent schema."
+    )
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

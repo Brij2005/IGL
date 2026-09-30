@@ -31,15 +31,20 @@ The command executes the existing `StreamReader` and rolling `FrameBuffer`, then
 
 ## Report Fields
 
-The JSON report records OS/Python/OpenCV/PyTorch/Ultralytics versions; model name/version/weights filename/confidence/load state; input type/resolution/source FPS/duration; received and processed frames; inference attempts/completions and average measured latency; processing FPS; detections; unique visual tracks and lifecycle transitions; dropped frames, inference/tracking errors, reconnects, and pipeline errors.
+The JSON report records the input provenance, OS/Python/OpenCV/PyTorch/Ultralytics versions; model name/version/weights filename/confidence/load state; input type/resolution/source FPS/duration and stream terminal state; received and processed frames; inference attempts/completions and average measured latency; processing FPS; detections; unique visual tracks and lifecycle transitions; dropped frames, inference/tracking errors, reconnects, and pipeline errors.
 
-`source_fps` is read from the input capture metadata. `processing_fps` is the measured count of frames handed through the pipeline divided by elapsed wall-clock processing duration. Neither is inferred from the other. A report does not establish accuracy or prove real-time operation.
+`input_provenance` is `AUTHORIZED_REAL_INPUT` for a normal command-line run. The test suite passes `TEST_FIXTURE` explicitly, and the CLI has no flag to select it, so a test run can never be recorded as real-input validation.
+
+`source_fps` is read from the input capture metadata. `processing_fps` is the measured count of frames handed through the pipeline divided by the processing window, which is measured before teardown so shutdown time cannot depress the figure. Neither is inferred from the other. A report does not establish accuracy or prove real-time operation.
+
+The report is complete when `create_report` returns. The redacted source identifier and the stream terminal state are part of report construction, not patched in afterwards.
 
 ## Status Meaning
 
-- `NOT_VALIDATED`: input/model/configuration failed or the pipeline did not complete meaningful work.
+- `NOT_VALIDATED`: input/model/configuration failed or the pipeline did not complete meaningful work. A run that could not start still writes a report recording the blocking reason and zero pipeline work.
+- `TEST_FIXTURE_EXECUTION`: the pipeline completed cleanly using test doubles. This is a software test result only and is never a validation claim.
 - `TECHNICAL_PIPELINE_VALIDATED`: reserved for a real-source ingestion-only validation where the model is unavailable; this runner currently requires a configured model before starting the full pipeline.
-- `REAL_INPUT_VALIDATED`: real source frames and successful model inference traversed the pipeline without recorded inference/tracking/source errors. This is technical execution only, not accuracy validation.
+- `REAL_INPUT_VALIDATED`: authorized real source frames and successful model inference traversed the pipeline without recorded inference/tracking/source errors. This is technical execution only, not accuracy validation. Report assembly refuses this status if the input provenance is not authorized, if no frame was processed, if no inference completed, or if any error is recorded.
 - `IGL_VALIDATED`: never assigned by this command.
 
 The report always records `igl_validated: false`.

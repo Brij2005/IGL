@@ -3,6 +3,9 @@ Database configuration and session management for IGL Safety Platform.
 Uses SQLAlchemy with SQLite for development; PostgreSQL-ready for production.
 """
 import os
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -52,13 +55,38 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db():
-    """Create all tables. Safe to call repeatedly."""
-    try:
-        from app.models import Base as ModelsBase  # noqa: F401
-    except ImportError:
-        from backend.app.models import Base as ModelsBase  # noqa: F401
-    Base.metadata.create_all(bind=engine)
-    return engine
+    """Refuse implicit schema creation.
+
+    Schema is owned exclusively by the Alembic migrations. Creating tables from
+    ORM metadata at runtime would create an untracked, partially migrated schema
+    that the startup head check cannot reason about, so this helper exists only
+    to fail loudly for any caller that still expects ``create_all`` behaviour.
+    """
+    raise RuntimeError(
+        "init_db() no longer creates tables. Schema is migration-owned; run "
+        "'alembic -c backend/alembic.ini upgrade head' instead."
+    )
+
+
+def get_migration_state() -> tuple[set[str], set[str]]:
+    """Return the (expected, current) Alembic revision heads for this engine."""
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    alembic_config = Config(os.path.join(backend_dir, "alembic.ini"))
+    alembic_config.set_main_option("script_location", os.path.join(backend_dir, "migrations"))
+    expected_heads = set(ScriptDirectory.from_config(alembic_config).get_heads())
+    with engine.connect() as connection:
+        current_heads = set(MigrationContext.configure(connection).get_current_heads())
+    return expected_heads, current_heads
+
+
+def require_database_at_migration_head() -> None:
+    """Refuse to operate on a schema that has not been explicitly migrated."""
+    expected_heads, current_heads = get_migration_state()
+    if current_heads != expected_heads:
+        raise RuntimeError(
+            "Database migration is missing or out of date; run "
+            "'alembic -c backend/alembic.ini upgrade head' before starting the API"
+        )
 
 
 @event.listens_for(engine, "connect")

@@ -2,7 +2,8 @@
 Authentication and Role-Based Access Control (RBAC) API Endpoints.
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 try:
@@ -28,6 +29,8 @@ except ImportError:
 
 
 router = APIRouter()
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 500
 
 
 @router.post("/login", response_model=Token)
@@ -163,7 +166,7 @@ def create_user(
         )
         
     hashed_pwd = hash_password(user_in.password)
-    
+
     new_user = User(
         username=user_in.username,
         email=user_in.email,
@@ -173,9 +176,16 @@ def create_user(
         role_id=target_role.id,
         is_active=True
     )
-    
+
     db.add(new_user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username or email address already registered"
+        ) from exc
     db.refresh(new_user)
     
     log_audit_event(
@@ -196,14 +206,15 @@ def create_user(
 
 @router.get("/users", response_model=List[UserOut])
 def list_users(
+    limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("ADMIN", "PLANT_MANAGER"))
 ):
     """
-    List all platform users (Requires ADMIN or PLANT_MANAGER role).
+    List platform users (Requires ADMIN or PLANT_MANAGER role).
     """
-    users = db.query(User).all()
-    return users
+    return db.query(User).order_by(User.username).offset(offset).limit(limit).all()
 
 
 @router.put("/users/{user_id}/role", response_model=UserOut)
@@ -256,12 +267,12 @@ def update_user_role(
 
 @router.get("/audit-logs", response_model=List[AuditLogOut])
 def get_audit_logs(
-    limit: int = 100,
+    limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("ADMIN", "PLANT_MANAGER"))
 ):
     """
     Retrieve security and activity audit logs (Requires ADMIN or PLANT_MANAGER role).
     """
-    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(limit).all()
-    return logs
+    return db.query(AuditLog).order_by(AuditLog.timestamp.desc()).offset(offset).limit(limit).all()

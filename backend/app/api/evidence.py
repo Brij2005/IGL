@@ -1,7 +1,7 @@
 """Access-controlled retrieval for event-linked evidence files."""
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -9,26 +9,37 @@ try:
     from app.auth import require_permission
     from app.database import get_db
     from app.models import Event, EventEvidence, User
+    from app.schemas_system import EvidenceOut
     from app.services.evidence_engine import evidence_engine
 except ImportError:
     from backend.app.auth import require_permission
     from backend.app.database import get_db
     from backend.app.models import Event, EventEvidence, User
+    from backend.app.schemas_system import EvidenceOut
     from backend.app.services.evidence_engine import evidence_engine
 
 
 router = APIRouter()
 
 
-@router.get("/events/{event_id}/evidence")
+@router.get("/events/{event_id}/evidence", response_model=list[EvidenceOut])
 def list_event_evidence(
     event_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(require_permission("events:view")),
 ):
     if db.query(Event.id).filter(Event.id == event_id).first() is None:
         raise HTTPException(status_code=404, detail="Event not found")
-    items = db.query(EventEvidence).filter(EventEvidence.event_id == event_id).order_by(EventEvidence.created_at.desc()).all()
+    items = (
+        db.query(EventEvidence)
+        .filter(EventEvidence.event_id == event_id)
+        .order_by(EventEvidence.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     return [{
         "id": item.id,
         "event_id": item.event_id,

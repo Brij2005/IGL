@@ -6,16 +6,18 @@ try:
     from app.auth import require_permission
     from app.database import get_db
     from app.models import Camera, CameraHealth, CorrectiveAction, Event, Incident, NearMiss, Plant, User
+    from app.schemas_system import AnalyticsSummaryOut
 except ImportError:
     from backend.app.auth import require_permission
     from backend.app.database import get_db
     from backend.app.models import Camera, CameraHealth, CorrectiveAction, Event, Incident, NearMiss, Plant, User
+    from backend.app.schemas_system import AnalyticsSummaryOut
 
 
 router = APIRouter()
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=AnalyticsSummaryOut)
 def get_summary_analytics(
     db: Session = Depends(get_db),
     user: User = Depends(require_permission("analytics:view")),

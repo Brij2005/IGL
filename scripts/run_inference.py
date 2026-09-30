@@ -34,7 +34,16 @@ from app.utils.redaction import safe_source_identifier
 
 LOGGER = logging.getLogger("igl.validation")
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
-VALIDATION_STATUSES = {"NOT_VALIDATED", "TECHNICAL_PIPELINE_VALIDATED", "REAL_INPUT_VALIDATED", "IGL_VALIDATED"}
+VALIDATION_STATUSES = {
+    "NOT_VALIDATED",
+    "TECHNICAL_PIPELINE_VALIDATED",
+    "REAL_INPUT_VALIDATED",
+    "IGL_VALIDATED",
+    "TEST_FIXTURE_EXECUTION",
+}
+AUTHORIZED_REAL_INPUT = "AUTHORIZED_REAL_INPUT"
+TEST_FIXTURE = "TEST_FIXTURE"
+INPUT_PROVENANCES = {AUTHORIZED_REAL_INPUT, TEST_FIXTURE}
 
 
 class ValidationError(ValueError):
@@ -123,22 +132,47 @@ def create_report(
     *,
     source: str,
     source_type: str,
-    source_identifier: str,
     model: UltralyticsModelAdapter,
     reader: StreamReader | None,
     pipeline: CameraInferencePipeline | None,
     processing_seconds: float,
     validation_status: str,
     errors: list[str],
+    stream_terminal_state: str | None = None,
+    input_provenance: str = AUTHORIZED_REAL_INPUT,
 ) -> dict[str, Any]:
+    """Assemble a complete report.
+
+    The report is final at construction time: the redacted source identifier and
+    the stream terminal state are computed here rather than patched in later.
+    A ``REAL_INPUT_VALIDATED`` status is rejected unless the run used an
+    authorized real input, actually processed frames, actually completed
+    inference, and recorded no errors, so a report can never claim real-input
+    validation that did not happen.
+    """
+    if validation_status not in VALIDATION_STATUSES:
+        raise ValueError("Invalid validation status")
+    if input_provenance not in INPUT_PROVENANCES:
+        raise ValueError("Invalid input provenance")
+
     reader_frames = reader.total_frames_read if reader else 0
     pipeline_status = pipeline.status() if pipeline else {}
     processed_frames = int(pipeline_status.get("frames_seen", 0))
     inference_count = model.inference_count
     tracking_metrics = pipeline.tracker.metrics() if pipeline else {"unique_track_count": 0, "lifecycle_transitions": {}}
     processing_fps = round(processed_frames / processing_seconds, 3) if processing_seconds > 0 else None
+
+    if validation_status == "REAL_INPUT_VALIDATED":
+        if input_provenance != AUTHORIZED_REAL_INPUT:
+            raise ValueError("REAL_INPUT_VALIDATED requires an authorized real input, not a test fixture")
+        if errors:
+            raise ValueError("REAL_INPUT_VALIDATED cannot be reported while errors are recorded")
+        if reader_frames <= 0 or processed_frames <= 0 or inference_count <= 0:
+            raise ValueError("REAL_INPUT_VALIDATED requires observed frames and completed inference")
+
     report = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "input_provenance": input_provenance,
         "environment": {
             "os": platform.platform(),
             "python_version": platform.python_version(),
@@ -157,7 +191,7 @@ def create_report(
         },
         "input": {
             "source_type": source_type,
-            "source_identifier": source_identifier,
+            "source_identifier": safe_source_identifier(source),
             "resolution": list(reader.source_resolution) if reader and reader.source_resolution else None,
             "source_fps": reader.source_fps if reader else None,
             "duration_processed_seconds": round(processing_seconds, 3),
@@ -165,6 +199,7 @@ def create_report(
             "connection_established": reader._has_connected if reader else False,
             "first_frame_timestamp": reader.first_frame_timestamp.isoformat() if reader and reader.first_frame_timestamp else None,
             "last_frame_timestamp": reader.last_frame_timestamp.isoformat() if reader and reader.last_frame_timestamp else None,
+            "stream_terminal_state": stream_terminal_state,
         },
         "pipeline": {
             "frames_received": reader_frames,
@@ -187,9 +222,30 @@ def create_report(
         "validation_status": validation_status,
         "igl_validated": False,
     }
-    if report["validation_status"] not in VALIDATION_STATUSES:
-        raise ValueError("Invalid validation status")
     return report
+
+
+def create_blocked_report(
+    *,
+    source: str,
+    source_type: str,
+    model: UltralyticsModelAdapter,
+    reason: str,
+    input_provenance: str = AUTHORIZED_REAL_INPUT,
+) -> dict[str, Any]:
+    """Assemble a report for a run that could not start; no pipeline work is claimed."""
+    return create_report(
+        source=source,
+        source_type=source_type,
+        model=model,
+        reader=None,
+        pipeline=None,
+        processing_seconds=0.0,
+        validation_status="NOT_VALIDATED",
+        errors=[reason],
+        stream_terminal_state="NOT_STARTED",
+        input_provenance=input_provenance,
+    )
 
 
 def save_report(report: dict[str, Any], report_path: str | Path | None = None) -> Path:
@@ -211,16 +267,29 @@ def run_validation(
     model: UltralyticsModelAdapter,
     duration_seconds: float | None,
     report_path: str | Path | None,
+    input_provenance: str = AUTHORIZED_REAL_INPUT,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
+    if input_provenance not in INPUT_PROVENANCES:
+        raise ValueError("Invalid input provenance")
+
     model_error = validate_model_configuration(model)
     if model_error:
-        return 2, None, model_error
+        blocked = create_blocked_report(
+            source=source,
+            source_type=source_type,
+            model=model,
+            reason=model_error,
+            input_provenance=input_provenance,
+        )
+        save_report(blocked, report_path)
+        return 2, blocked, model_error
 
     camera_id = "phase4-validation"
     tracker = IoUTracker()
     reader = StreamReader(camera_id, source)
     pipeline = CameraInferencePipeline(camera_id, model, tracker, threading.Lock())
     started = time.monotonic()
+    processing_finished: float | None = None
     source_terminal_state = None
     errors: list[str] = []
     reader.start()
@@ -240,6 +309,9 @@ def run_validation(
         source_terminal_state = "INTERRUPTED"
         errors.append("INTERRUPTED")
     finally:
+        # Capture the processing window before teardown so the reported
+        # duration and processing FPS are not depressed by shutdown time.
+        processing_finished = time.monotonic()
         if reader._running:
             source_terminal_state = source_terminal_state or reader.status
             reader.stop()
@@ -249,6 +321,8 @@ def run_validation(
             errors.append("PIPELINE_SHUTDOWN_TIMEOUT")
             pipeline.stop()
 
+    if source_terminal_state is None:
+        source_terminal_state = reader.status
     if source_terminal_state in {"SOURCE_UNAVAILABLE", "DISCONNECTED"}:
         errors.append(source_terminal_state)
     state = pipeline.status()
@@ -260,31 +334,37 @@ def run_validation(
         errors.append(reader.last_error)
     if state["last_error_type"]:
         errors.append(state["last_error_type"])
-    elapsed = max(time.monotonic() - started, 0.0)
-    success = (
+    elapsed = max((processing_finished or time.monotonic()) - started, 0.0)
+    pipeline_ran_cleanly = (
         reader.total_frames_read > 0
         and state["inferences_completed"] > 0
         and state["inference_failures"] == 0
         and state["tracking_failures"] == 0
         and not errors
     )
-    validation_status = "REAL_INPUT_VALIDATED" if success else "NOT_VALIDATED"
+    if input_provenance == TEST_FIXTURE:
+        # Test doubles are never real input. A technically clean fixture run is
+        # reported as a test execution, never as real-input validation.
+        validation_status = "TEST_FIXTURE_EXECUTION" if pipeline_ran_cleanly else "NOT_VALIDATED"
+    else:
+        validation_status = "REAL_INPUT_VALIDATED" if pipeline_ran_cleanly else "NOT_VALIDATED"
     report = create_report(
         source=source,
         source_type=source_type,
-        source_identifier=safe_source_identifier(source),
         model=model,
         reader=reader,
         pipeline=pipeline,
         processing_seconds=elapsed,
         validation_status=validation_status,
         errors=errors,
+        stream_terminal_state=source_terminal_state,
+        input_provenance=input_provenance,
     )
-    report["input"]["stream_terminal_state"] = source_terminal_state or reader.status
     output_path = save_report(report, report_path)
     print(f"validation_status: {validation_status}")
+    print(f"input_provenance: {input_provenance}")
     print(f"report: {output_path}")
-    return (0 if success else 1), report, None
+    return (0 if pipeline_ran_cleanly else 1), report, None
 
 
 def main(argv: list[str] | None = None) -> int:

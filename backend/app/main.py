@@ -3,14 +3,18 @@ FastAPI Main Application Entry Point for IGL Industrial AI Safety & Incident Int
 """
 import sys
 import os
-from pathlib import Path
 from contextlib import asynccontextmanager
-from alembic.config import Config
-from alembic.migration import MigrationContext
-from alembic.script import ScriptDirectory
-from fastapi import FastAPI
+from uuid import uuid4
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+
+# Correlation identifier header. Incoming values are only accepted when they
+# look like a bounded opaque token, so a caller cannot inject arbitrary text
+# into logs or downstream headers.
+REQUEST_ID_HEADER = "X-Request-ID"
+MAX_REQUEST_ID_LENGTH = 64
+_ALLOWED_REQUEST_ID_CHARACTERS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 # Ensure the project and backend packages resolve from either supported launch directory.
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +24,7 @@ sys.path.insert(0, BACKEND_DIR)
 
 try:
     from app.config import settings
-    from app.database import engine, SessionLocal
+    from app.database import engine, SessionLocal, require_database_at_migration_head
     from app.models import Role
     from app.api import api_router
     from app.services.inference_pipeline import pipeline_manager
@@ -28,7 +32,7 @@ try:
     from app.services.system_health import collect_system_health
 except ImportError:
     from backend.app.config import settings
-    from backend.app.database import engine, SessionLocal
+    from backend.app.database import engine, SessionLocal, require_database_at_migration_head
     from backend.app.models import Role
     from backend.app.api import api_router
     from backend.app.services.inference_pipeline import pipeline_manager
@@ -84,21 +88,6 @@ def seed_default_roles(db: Session):
     db.commit()
 
 
-def require_database_at_migration_head() -> None:
-    """Refuse startup when the configured schema has not been explicitly migrated."""
-    backend_dir = Path(__file__).resolve().parents[1]
-    alembic_config = Config(str(backend_dir / "alembic.ini"))
-    alembic_config.set_main_option("script_location", str(backend_dir / "migrations"))
-    expected_heads = set(ScriptDirectory.from_config(alembic_config).get_heads())
-    with engine.connect() as connection:
-        current_heads = set(MigrationContext.configure(connection).get_current_heads())
-    if current_heads != expected_heads:
-        raise RuntimeError(
-            "Database migration is missing or out of date; run "
-            "'alembic -c backend/alembic.ini upgrade head' before starting the API"
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events management."""
@@ -137,18 +126,42 @@ app.add_middleware(
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Attach a correlation ID to every request and response."""
+    candidate = request.headers.get(REQUEST_ID_HEADER, "")
+    request_id = (
+        candidate
+        if candidate
+        and len(candidate) <= MAX_REQUEST_ID_LENGTH
+        and set(candidate) <= _ALLOWED_REQUEST_ID_CHARACTERS
+        else uuid4().hex
+    )
+    request.state.request_id = request_id
+    response: Response = await call_next(request)
+    response.headers[REQUEST_ID_HEADER] = request_id
+    return response
+
+
 @app.get("/")
 def root():
     """Return derived status rather than implying health from API availability alone."""
     system_health = collect_system_health()
     return {
-        "status": system_health["overall_status"],
-        "api": system_health["api"],
+        "application": system_health["application"],
+        "overall_status": system_health["overall_status"],
+        "degraded_reasons": system_health["degraded_reasons"],
         "database": system_health["database"],
         "migrations": system_health["migrations"],
-        "model_status": system_health["model"]["status"],
+        "model_state": system_health["model_state"],
+        "camera_state": system_health["camera_state"],
+        "camera_health_worker": system_health["camera_health_worker"],
+        "inference_pipeline": system_health["inference_pipeline"],
+        "validation_status": system_health["validation_status"],
+        "igl_validated": system_health["igl_validated"],
         "igl_configuration_status": system_health["igl_configuration_status"],
+        "measured_performance": system_health["measured_performance"],
         "platform": settings.PROJECT_NAME,
         "version": settings.VERSION,
-        "docs_url": "/docs"
+        "docs_url": "/docs",
     }

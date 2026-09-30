@@ -2,29 +2,35 @@
 Pydantic schemas for Camera Management and Real-time Telemetry.
 """
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+try:
+    from app.utils.redaction import display_source_identifier
+except ImportError:
+    from backend.app.utils.redaction import display_source_identifier
+
+
+# The database column is 1200 characters wide; keep the API limit aligned.
+MAX_STREAM_URL_LENGTH = 1200
 
 
 def sanitize_stream_url(stream_url: str) -> str:
-    """Remove userinfo, all query parameters, and fragments from a displayed URL."""
-    try:
-        parsed = urlsplit(stream_url)
-        hostname = parsed.hostname or ""
-        if ":" in hostname and not hostname.startswith("["):
-            hostname = f"[{hostname}]"
-        if parsed.port is not None:
-            hostname = f"{hostname}:{parsed.port}"
-        return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
-    except ValueError:
-        return "CONFIGURATION_REQUIRED"
+    """Return a display-safe source identifier.
+
+    Delegates to the shared redaction helper so API responses, validation
+    reports, and logs cannot drift apart. User information, query parameters,
+    and fragments are always removed, and a source that cannot be parsed is
+    reduced to its final path segment rather than echoed.
+    """
+    return display_source_identifier(stream_url)
 
 
 class CameraBase(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     code: str = Field(..., min_length=2, max_length=50)
-    stream_url: str = Field(..., min_length=5, max_length=500)
+    stream_url: str = Field(..., min_length=5, max_length=MAX_STREAM_URL_LENGTH)
     camera_type: str = Field("RTSP", max_length=50)  # RTSP, IP, PTZ, FIXED, USB, FILE
     fps: float = Field(25.0, ge=1.0, le=120.0)
     resolution: str = Field("1920x1080", max_length=20)
@@ -38,7 +44,7 @@ class CameraCreate(CameraBase):
 
 class CameraUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=100)
-    stream_url: Optional[str] = Field(None, min_length=5, max_length=500)
+    stream_url: Optional[str] = Field(None, min_length=5, max_length=MAX_STREAM_URL_LENGTH)
     camera_type: Optional[str] = Field(None, max_length=50)
     fps: Optional[float] = Field(None, ge=1.0, le=120.0)
     resolution: Optional[str] = Field(None, max_length=20)

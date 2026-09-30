@@ -4,7 +4,20 @@ Strictly excludes password hashes from all user response models.
 """
 from datetime import datetime
 from typing import Optional, Any
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+
+# bcrypt only consumes the first 72 bytes and rejects longer input in current
+# releases, so a longer password must be rejected rather than silently truncated.
+BCRYPT_MAX_PASSWORD_BYTES = 72
+MINIMUM_PASSWORD_LENGTH = 12
+
+
+def validate_password_bytes(password: str) -> str:
+    """Reject a password bcrypt cannot represent faithfully."""
+    if len(password.encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError("password must be at most 72 bytes when UTF-8 encoded")
+    return password
 
 
 # ============================================================================
@@ -31,6 +44,11 @@ class LoginRequest(BaseModel):
     """Authentication login request payload."""
     username: str = Field(..., min_length=2, max_length=100)
     password: str = Field(..., min_length=4, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def check_password_size(cls, value: str) -> str:
+        return validate_password_bytes(value)
 
 
 # ============================================================================
@@ -66,16 +84,26 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=MINIMUM_PASSWORD_LENGTH, max_length=128)
     role_name: Optional[str] = "OPERATOR"
+
+    @field_validator("password")
+    @classmethod
+    def check_password_size(cls, value: str) -> str:
+        return validate_password_bytes(value)
 
 
 class UserUpdate(BaseModel):
     email: Optional[str] = Field(None, min_length=5, max_length=255)
     full_name: Optional[str] = Field(None, min_length=2, max_length=150)
-    password: Optional[str] = Field(None, min_length=6, max_length=128)
+    password: Optional[str] = Field(None, min_length=MINIMUM_PASSWORD_LENGTH, max_length=128)
     employee_code: Optional[str] = Field(None, max_length=50)
     is_active: Optional[bool] = None
+
+    @field_validator("password")
+    @classmethod
+    def check_password_size(cls, value: str | None) -> str | None:
+        return validate_password_bytes(value) if value is not None else None
 
 
 class UserRoleUpdate(BaseModel):

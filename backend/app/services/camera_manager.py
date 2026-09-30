@@ -47,12 +47,14 @@ class CameraManager:
         db.commit()
         db.refresh(camera)
 
-        # Initialize CameraHealth telemetry record
+        # Initialize CameraHealth telemetry record.
+        # Status is CONFIGURED and every measured value stays NULL: no frame
+        # has been observed yet, so nothing may be reported as measured.
         health = CameraHealth(
             camera_id=camera.id,
             status="CONFIGURED",
-            fps=0.0,
-            latency_ms=0.0,
+            fps=None,
+            latency_ms=None,
             is_frozen=False,
             is_black=False,
             image_quality_score=None,
@@ -84,15 +86,17 @@ class CameraManager:
     def list_cameras(
         db: Session,
         zone_id: Optional[str] = None,
-        active_only: bool = True
+        active_only: bool = True,
+        limit: int = 100,
+        offset: int = 0,
     ) -> List[Camera]:
-        """List cameras filtered by zone or active status."""
+        """List cameras filtered by zone or active status, paginated."""
         query = db.query(Camera)
         if active_only:
             query = query.filter(Camera.is_active.is_(True))
         if zone_id:
             query = query.filter(Camera.zone_id == zone_id)
-        return query.all()
+        return query.order_by(Camera.code).offset(offset).limit(limit).all()
 
     @staticmethod
     def update_camera(db: Session, camera_id: str, camera_in: CameraUpdate) -> Optional[Camera]:

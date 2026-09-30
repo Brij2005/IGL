@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
     LOGIN_RATE_LIMIT_ATTEMPTS: int = Field(default=5, ge=1, le=100)
     LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = Field(default=900, ge=1, le=86400)
+    MINIMUM_ADMIN_PASSWORD_LENGTH: int = Field(default=12, ge=12, le=128)
+
+    # First-admin bootstrap. Disabled unless an operator explicitly enables it
+    # and supplies every value. There is no default password and no fallback.
+    BOOTSTRAP_ADMIN_ENABLED: bool = False
+    BOOTSTRAP_ADMIN_USERNAME: str | None = None
+    BOOTSTRAP_ADMIN_EMAIL: str | None = None
+    BOOTSTRAP_ADMIN_FULL_NAME: str | None = None
+    BOOTSTRAP_ADMIN_PASSWORD: SecretStr | None = None
 
     # Database
     DATABASE_URL: str = f"sqlite:///{Path(__file__).resolve().parents[2] / 'data' / 'database.db'}"
@@ -60,6 +69,22 @@ class Settings(BaseSettings):
             secret = self.SECRET_KEY.get_secret_value()
             if secret == DEVELOPMENT_SECRET_KEY or len(secret) < 32:
                 raise ValueError("Production requires a non-default SECRET_KEY of at least 32 characters")
+        if self.BOOTSTRAP_ADMIN_ENABLED:
+            missing = [
+                name
+                for name in (
+                    "BOOTSTRAP_ADMIN_USERNAME",
+                    "BOOTSTRAP_ADMIN_EMAIL",
+                    "BOOTSTRAP_ADMIN_FULL_NAME",
+                    "BOOTSTRAP_ADMIN_PASSWORD",
+                )
+                if not getattr(self, name)
+            ]
+            if missing:
+                raise ValueError(
+                    "BOOTSTRAP_ADMIN_ENABLED requires operator-supplied values for: "
+                    + ", ".join(missing)
+                )
         return self
 
 

@@ -12,11 +12,28 @@ python scripts/bootstrap_admin.py
 uvicorn backend.app.main:app --reload
 ```
 
-The API refuses to start unless the database revision matches the Alembic head. The one-time interactive bootstrap seeds the fixed platform roles and creates the first administrator only when the users table is empty. It requires a new password (minimum 12 characters), prompts without echoing it, and refuses to run after any account exists. Do not automate it with a committed password.
+The API refuses to start unless the database revision matches the Alembic head. Schema is owned exclusively by the migrations; `init_db()` no longer creates tables and raises instead.
+
+The one-time bootstrap seeds the fixed platform roles and creates the first administrator only when the users table is empty. Startup never creates an administrator.
+
+Two bootstrap modes are available, neither of which has a default credential:
+
+- Interactive (default): prompts for a new username, email, full name, and password of at least 12 characters, without echoing it.
+- Non-interactive: set `BOOTSTRAP_ADMIN_ENABLED=true` plus every `BOOTSTRAP_ADMIN_*` value, then run `python scripts/bootstrap_admin.py --configured`. Remove those values afterwards.
+
+Either way, bootstrap refuses to run once any user exists, rejects a password that bcrypt cannot represent, and never logs a credential.
 
 Login throttling is configurable through `LOGIN_RATE_LIMIT_ATTEMPTS` and `LOGIN_RATE_LIMIT_WINDOW_SECONDS`. The current limiter is in-process; multi-worker deployments need a shared rate-limit store.
 
-The default SQLite location resolves relative to the project root. The migration adds schema to a new database; do not delete, recreate, or reset an existing database as a setup step.
+The default SQLite location resolves relative to the project root. Migrations add schema to an existing database; do not delete, recreate, or reset a database as a setup step.
+
+## Tests
+
+```powershell
+python -m pytest backend/tests -q
+```
+
+`backend/tests/conftest.py` creates a temporary file database, migrates it with the real Alembic chain, and points the application at it before any application module is imported. The suite therefore never reads, writes, or drops your configured database.
 
 ## Model Configuration
 
