@@ -3,15 +3,12 @@ Pydantic schemas for Camera Management and Real-time Telemetry.
 """
 from datetime import datetime
 from typing import Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
-_CREDENTIAL_QUERY_KEYS = {"auth", "key", "pass", "password", "pwd", "secret", "token", "user", "username"}
-
-
 def sanitize_stream_url(stream_url: str) -> str:
-    """Remove URL userinfo and redact credential-like query parameters."""
+    """Remove userinfo, all query parameters, and fragments from a displayed URL."""
     try:
         parsed = urlsplit(stream_url)
         hostname = parsed.hostname or ""
@@ -19,11 +16,7 @@ def sanitize_stream_url(stream_url: str) -> str:
             hostname = f"[{hostname}]"
         if parsed.port is not None:
             hostname = f"{hostname}:{parsed.port}"
-        query = [
-            (key, "REDACTED" if key.lower() in _CREDENTIAL_QUERY_KEYS else value)
-            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        ]
-        return urlunsplit((parsed.scheme, hostname, parsed.path, urlencode(query), ""))
+        return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
     except ValueError:
         return "CONFIGURATION_REQUIRED"
 

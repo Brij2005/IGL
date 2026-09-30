@@ -8,8 +8,13 @@ From the project root, install the pinned dependencies, copy `.env.example` to `
 python -m pip install -r backend/requirements.txt
 Copy-Item .env.example .env
 alembic -c backend/alembic.ini upgrade head
+python scripts/bootstrap_admin.py
 uvicorn backend.app.main:app --reload
 ```
+
+The API refuses to start unless the database revision matches the Alembic head. The one-time interactive bootstrap seeds the fixed platform roles and creates the first administrator only when the users table is empty. It requires a new password (minimum 12 characters), prompts without echoing it, and refuses to run after any account exists. Do not automate it with a committed password.
+
+Login throttling is configurable through `LOGIN_RATE_LIMIT_ATTEMPTS` and `LOGIN_RATE_LIMIT_WINDOW_SECONDS`. The current limiter is in-process; multi-worker deployments need a shared rate-limit store.
 
 The default SQLite location resolves relative to the project root. The migration adds schema to a new database; do not delete, recreate, or reset an existing database as a setup step.
 

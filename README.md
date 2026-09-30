@@ -17,8 +17,11 @@ Use Python 3.13 or another environment compatible with the pinned packages.
 python -m pip install -r backend/requirements.txt
 Copy-Item .env.example .env
 alembic -c backend/alembic.ini upgrade head
+python scripts/bootstrap_admin.py
 uvicorn backend.app.main:app --reload
 ```
+
+The bootstrap command prompts for a new username, email, full name, and password. It refuses to run after any user exists and never uses a default password.
 
 The default development database is `data/database.db`. Never delete or recreate an existing database to apply this setup. See [docs/setup.md](docs/setup.md) for configuration and production safeguards.
 

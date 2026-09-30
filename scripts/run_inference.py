@@ -249,13 +249,13 @@ def run_validation(
 
     if source_terminal_state in {"SOURCE_UNAVAILABLE", "DISCONNECTED"}:
         errors.append(source_terminal_state)
+    state = pipeline.status()
     if reader.total_frames_read == 0:
         errors.append("NO_FRAMES_RECEIVED")
     if state["inferences_completed"] == 0:
         errors.append("NO_INFERENCE_COMPLETED")
     if reader.last_error:
         errors.append(reader.last_error)
-    state = pipeline.status()
     if state["last_error_type"]:
         errors.append(state["last_error_type"])
     elapsed = max(time.monotonic() - started, 0.0)

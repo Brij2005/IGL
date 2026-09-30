@@ -3,7 +3,11 @@ FastAPI Main Application Entry Point for IGL Industrial AI Safety & Incident Int
 """
 import sys
 import os
+from pathlib import Path
 from contextlib import asynccontextmanager
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -16,13 +20,13 @@ sys.path.insert(0, BACKEND_DIR)
 
 try:
     from app.config import settings
-    from app.database import init_db, SessionLocal
+    from app.database import engine, SessionLocal
     from app.models import Role
     from app.api import api_router
     from app.services.inference_pipeline import pipeline_manager
 except ImportError:
     from backend.app.config import settings
-    from backend.app.database import init_db, SessionLocal
+    from backend.app.database import engine, SessionLocal
     from backend.app.models import Role
     from backend.app.api import api_router
     from backend.app.services.inference_pipeline import pipeline_manager
@@ -72,11 +76,25 @@ def seed_default_roles(db: Session):
     db.commit()
 
 
+def require_database_at_migration_head() -> None:
+    """Refuse startup when the configured schema has not been explicitly migrated."""
+    backend_dir = Path(__file__).resolve().parents[1]
+    alembic_config = Config(str(backend_dir / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(backend_dir / "migrations"))
+    expected_heads = set(ScriptDirectory.from_config(alembic_config).get_heads())
+    with engine.connect() as connection:
+        current_heads = set(MigrationContext.configure(connection).get_current_heads())
+    if current_heads != expected_heads:
+        raise RuntimeError(
+            "Database migration is missing or out of date; run "
+            "'alembic -c backend/alembic.ini upgrade head' before starting the API"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events management."""
-    # Startup: Initialize DB tables and seed roles
-    engine = init_db()
+    require_database_at_migration_head()
     pipeline_manager.prepare_model()
     db = SessionLocal()
     try:

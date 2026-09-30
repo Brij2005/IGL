@@ -181,7 +181,7 @@ def test_model_adapter_reports_inference_errors_without_returning_detections():
 
 def test_camera_stream_urls_are_sanitized_for_api_responses():
     safe = sanitize_stream_url("rtsp://operator:secret@camera.example:554/live?token=abc&channel=2")
-    assert safe == "rtsp://camera.example:554/live?token=REDACTED&channel=2"
+    assert safe == "rtsp://camera.example:554/live"
     now = datetime.now(timezone.utc)
     camera = CameraOut.model_validate({
         "id": "camera-1",

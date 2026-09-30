@@ -6,6 +6,9 @@ identity nullability, observation states, and workflow states.
 import pytest
 import sys
 import os
+import sqlite3
+import subprocess
+from pathlib import Path
 from datetime import datetime, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -248,3 +251,38 @@ def test_camera_health_and_ai_metrics(db_session):
     db_session.commit()
 
     assert metric.is_igl_validated is False
+
+
+def test_alembic_upgrade_downgrade_upgrade_uses_temporary_database(tmp_path):
+    project_root = Path(__file__).resolve().parents[2]
+    database_file = tmp_path / "migration-roundtrip.sqlite"
+    database_url = "sqlite:///" + str(database_file).replace("\\", "/")
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = database_url
+
+    def run_alembic(*arguments):
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", *arguments],
+            cwd=project_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def domain_tables():
+        with sqlite3.connect(database_file) as connection:
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        return tables - {"alembic_version"}
+
+    run_alembic("upgrade", "head")
+    assert len(domain_tables()) == 22
+    run_alembic("downgrade", "base")
+    assert domain_tables() == set()
+    run_alembic("upgrade", "head")
+    assert len(domain_tables()) == 22

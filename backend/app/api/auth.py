@@ -13,7 +13,7 @@ try:
     )
     from app.auth import (
         verify_password, hash_password, create_access_token,
-        get_current_active_user, require_role, log_audit_event
+        get_current_active_user, require_role, log_audit_event, login_rate_limiter
     )
 except ImportError:
     from backend.app.database import get_db
@@ -23,7 +23,7 @@ except ImportError:
     )
     from backend.app.auth import (
         verify_password, hash_password, create_access_token,
-        get_current_active_user, require_role, log_audit_event
+        get_current_active_user, require_role, log_audit_event, login_rate_limiter
     )
 
 
@@ -40,9 +40,21 @@ def login(
     Authenticate user credentials, log security audit event, and return JWT access token.
     """
     client_ip = request.client.host if request.client else None
+    rate_limit_key = client_ip or "unknown"
+    if login_rate_limiter.is_limited(rate_limit_key):
+        log_audit_event(
+            db=db,
+            user_id=None,
+            action="LOGIN_RATE_LIMITED",
+            resource_type="AUTHENTICATION",
+            details_json={"client_ip": client_ip},
+            ip_address=client_ip,
+        )
+        raise HTTPException(status_code=429, detail="Too many login attempts; retry later")
     user = db.query(User).filter(User.username == login_req.username).first()
     
     if not user or not verify_password(login_req.password, user.hashed_password):
+        login_rate_limiter.record_failure(rate_limit_key)
         # Audit log failed attempt
         log_audit_event(
             db=db,
@@ -71,6 +83,8 @@ def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is inactive"
         )
+
+    login_rate_limiter.clear(rate_limit_key)
         
     role_name = user.role.name if user.role else "OPERATOR"
     

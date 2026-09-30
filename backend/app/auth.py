@@ -3,6 +3,8 @@ Core authentication, password hashing, JWT token handling, security audit loggin
 and Role-Based Access Control (RBAC) dependencies.
 """
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict, deque
+from threading import Lock
 from typing import Optional, Callable, List
 import bcrypt
 import jwt
@@ -23,6 +25,50 @@ except ImportError:
 
 
 security = HTTPBearer()
+
+
+class LoginRateLimiter:
+    """Single-process per-client login throttle; use a shared store in multi-worker deployments."""
+
+    def __init__(self, attempts: int, window_seconds: int):
+        self.attempts = attempts
+        self.window_seconds = window_seconds
+        self._failures = defaultdict(deque)
+        self._lock = Lock()
+
+    def is_limited(self, key: str, now: float | None = None) -> bool:
+        current = now or datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._prune(current)
+            failures = self._failures.get(key)
+            return bool(failures and len(failures) >= self.attempts)
+
+    def record_failure(self, key: str, now: float | None = None) -> None:
+        current = now or datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._prune(current)
+            self._failures[key].append(current)
+
+    def clear(self, key: str) -> None:
+        with self._lock:
+            self._failures.pop(key, None)
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        expired = []
+        for key, failures in self._failures.items():
+            while failures and failures[0] <= cutoff:
+                failures.popleft()
+            if not failures:
+                expired.append(key)
+        for key in expired:
+            del self._failures[key]
+
+
+login_rate_limiter = LoginRateLimiter(
+    settings.LOGIN_RATE_LIMIT_ATTEMPTS,
+    settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 
 # ============================================================================

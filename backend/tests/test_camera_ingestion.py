@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.database import Base, get_db
-from app.models import User, Role, Camera, CameraHealth, Event
+from app.models import User, Role, Camera, CameraHealth, Event, AuditLog
 from app.auth import hash_password, create_access_token
 from app.services.camera_manager import CameraManager
 from app.services.health_monitor import health_monitor
@@ -76,7 +76,7 @@ def admin_auth_headers(test_db):
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_camera_crud_api(client, admin_auth_headers):
+def test_camera_crud_api(client, admin_auth_headers, test_db):
     """Verify camera registration, listing, updating, and deactivation."""
     # 1. Register Camera
     payload = {
@@ -110,6 +110,12 @@ def test_camera_crud_api(client, admin_auth_headers):
     # 4. Deactivate Camera
     del_resp = client.delete(f"/api/v1/cameras/{camera_id}", headers=admin_auth_headers)
     assert del_resp.status_code == 204
+
+    camera_logs = test_db.query(AuditLog).filter(AuditLog.resource_type == "CAMERA").all()
+    assert {entry.action for entry in camera_logs} >= {
+        "CAMERA_CREATED", "CAMERA_UPDATED", "CAMERA_DEACTIVATED"
+    }
+    assert all("rtsp://" not in str(entry.details_json) for entry in camera_logs)
 
 
 def test_black_frame_detection():

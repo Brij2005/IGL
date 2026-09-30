@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from app.database import Base, get_db
 from app.models import User, Role, AuditLog
-from app.auth import hash_password, create_access_token
+from app.auth import hash_password, create_access_token, LoginRateLimiter
 from app.main import app, seed_default_roles
 
 
@@ -250,3 +250,15 @@ def test_security_audit_logging(client, setup_users, test_db):
     login_logs = test_db.query(AuditLog).filter(AuditLog.action == "LOGIN_SUCCESS").all()
     assert len(login_logs) >= 1
     assert login_logs[0].details_json["username"] == "admin_test"
+
+
+def test_login_rate_limiter_expires_failures_and_clears_on_success():
+    limiter = LoginRateLimiter(attempts=2, window_seconds=10)
+    limiter.record_failure("test-client", now=100)
+    assert limiter.is_limited("test-client", now=105) is False
+    limiter.record_failure("test-client", now=106)
+    assert limiter.is_limited("test-client", now=107) is True
+    assert limiter.is_limited("test-client", now=111) is False
+    limiter.record_failure("test-client", now=112)
+    limiter.clear("test-client")
+    assert limiter.is_limited("test-client", now=112) is False

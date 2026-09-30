@@ -1,5 +1,6 @@
 from io import BytesIO
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import threading
@@ -137,3 +138,82 @@ def test_report_contains_only_safe_source_identifier_and_no_igl_claim():
     assert "token=x" not in serialized
     assert report["igl_validated"] is False
     assert report["validation_status"] == "NOT_VALIDATED"
+
+
+def test_successful_report_assembly_uses_test_doubles_only(monkeypatch, tmp_path):
+    class TestModel:
+        weights_path = SimpleNamespace(name="test-checkpoint.pt")
+        model_name = "test-model"
+        model_version = "test-version"
+        confidence_threshold = 0.5
+        inference_count = 1
+
+        @staticmethod
+        def health():
+            return {
+                "status": "READY",
+                "available": True,
+                "classes": [],
+                "average_inference_latency_ms": 1.0,
+            }
+
+    class TestReader:
+        def __init__(self, *args):
+            self.total_frames_read = 1
+            self.dropped_frames_count = 0
+            self.source_resolution = (16, 16)
+            self.source_fps = 24.0
+            self.source_duration_seconds = 1 / 24
+            self._has_connected = True
+            self.first_frame_timestamp = datetime.now(timezone.utc)
+            self.last_frame_timestamp = self.first_frame_timestamp
+            self.last_error = None
+            self.status = "END_OF_FILE"
+            self.reconnects = 0
+            self._running = False
+            self._thread = threading.Thread(target=lambda: None)
+
+        def start(self):
+            return None
+
+    class TestPipeline:
+        def __init__(self, *args):
+            self._running = False
+            self._thread = threading.Thread(target=lambda: None)
+            self.tracker = SimpleNamespace(metrics=lambda: {
+                "unique_track_count": 0,
+                "lifecycle_transitions": {},
+            })
+
+        def start(self, reader):
+            return None
+
+        @staticmethod
+        def status():
+            return {
+                "frames_seen": 1,
+                "inferences_completed": 1,
+                "inference_failures": 0,
+                "tracking_failures": 0,
+                "detection_count": 0,
+                "last_error_type": None,
+            }
+
+    monkeypatch.setattr(run_inference, "validate_model_configuration", lambda model: None)
+    monkeypatch.setattr(run_inference, "StreamReader", TestReader)
+    monkeypatch.setattr(run_inference, "CameraInferencePipeline", TestPipeline)
+    report_path = tmp_path / "controlled-test-report.json"
+
+    exit_code, report, error = run_inference.run_validation(
+        "authorized-test-input.mp4",
+        "LOCAL_VIDEO",
+        TestModel(),
+        None,
+        report_path,
+    )
+
+    assert exit_code == 0
+    assert error is None
+    assert report["validation_status"] == "REAL_INPUT_VALIDATED"
+    assert report["igl_validated"] is False
+    assert report_path.is_file()

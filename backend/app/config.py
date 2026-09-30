@@ -1,5 +1,6 @@
 """Global application settings and environment configuration."""
 from pathlib import Path
+from pydantic import Field
 from typing import Literal
 
 from pydantic import SecretStr, model_validator
@@ -20,6 +21,8 @@ class Settings(BaseSettings):
     SECRET_KEY: SecretStr = DEVELOPMENT_SECRET_KEY
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
+    LOGIN_RATE_LIMIT_ATTEMPTS: int = Field(default=5, ge=1, le=100)
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = Field(default=900, ge=1, le=86400)
 
     # Database
     DATABASE_URL: str = f"sqlite:///{Path(__file__).resolve().parents[2] / 'data' / 'database.db'}"

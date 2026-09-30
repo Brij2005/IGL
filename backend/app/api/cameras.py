@@ -2,7 +2,7 @@
 Camera Management and Health Telemetry API Routes.
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 try:
@@ -12,7 +12,7 @@ try:
     from app.services.camera_manager import CameraManager
     from app.services.health_monitor import health_monitor
     from app.services.inference_pipeline import pipeline_manager
-    from app.auth import get_current_active_user, require_role
+    from app.auth import get_current_active_user, require_role, log_audit_event
 except ImportError:
     from backend.app.database import get_db
     from backend.app.models import User
@@ -20,7 +20,7 @@ except ImportError:
     from backend.app.services.camera_manager import CameraManager
     from backend.app.services.health_monitor import health_monitor
     from backend.app.services.inference_pipeline import pipeline_manager
-    from backend.app.auth import get_current_active_user, require_role
+    from backend.app.auth import get_current_active_user, require_role, log_audit_event
 
 
 router = APIRouter()
@@ -29,6 +29,7 @@ router = APIRouter()
 @router.post("", response_model=CameraOut, status_code=status.HTTP_201_CREATED)
 def register_camera(
     camera_in: CameraCreate,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER"))
 ):
@@ -39,6 +40,15 @@ def register_camera(
         camera = CameraManager.create_camera(db, camera_in)
         # Start ingestion stream reader
         pipeline_manager.start_stream(camera.id, camera.stream_url, camera.fps)
+        log_audit_event(
+            db=db,
+            user_id=user.id,
+            action="CAMERA_CREATED",
+            resource_type="CAMERA",
+            resource_id=camera.id,
+            details_json={"camera_code": camera.code, "changed_fields": ["name", "code", "stream_url", "camera_type", "fps", "resolution", "location_description", "zone_id"]},
+            ip_address=request.client.host if request.client else None,
+        )
         return camera
     except ValueError as e:
         raise HTTPException(
@@ -83,12 +93,14 @@ def get_camera(
 def update_camera(
     camera_id: str,
     camera_in: CameraUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_role("ADMIN"))
 ):
     """
     Update camera configuration or RTSP stream URL (Requires ADMIN role).
     """
+    changed_fields = sorted(camera_in.model_dump(exclude_unset=True))
     camera = CameraManager.update_camera(db, camera_id, camera_in)
     if not camera:
         raise HTTPException(
@@ -101,6 +113,16 @@ def update_camera(
         pipeline_manager.start_stream(camera.id, camera.stream_url, camera.fps)
     else:
         pipeline_manager.stop_stream(camera.id)
+
+    log_audit_event(
+        db=db,
+        user_id=user.id,
+        action="CAMERA_UPDATED",
+        resource_type="CAMERA",
+        resource_id=camera.id,
+        details_json={"camera_code": camera.code, "changed_fields": changed_fields},
+        ip_address=request.client.host if request.client else None,
+    )
         
     return camera
 
@@ -108,6 +130,7 @@ def update_camera(
 @router.delete("/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
 def deactivate_camera(
     camera_id: str,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_role("ADMIN"))
 ):
@@ -121,6 +144,15 @@ def deactivate_camera(
             detail="Camera not found"
         )
     pipeline_manager.stop_stream(camera_id)
+    log_audit_event(
+        db=db,
+        user_id=user.id,
+        action="CAMERA_DEACTIVATED",
+        resource_type="CAMERA",
+        resource_id=camera_id,
+        details_json={"camera_id": camera_id},
+        ip_address=request.client.host if request.client else None,
+    )
 
 
 @router.get("/{camera_id}/health", response_model=CameraHealthOut)
