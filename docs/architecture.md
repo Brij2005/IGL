@@ -8,11 +8,14 @@
 
 Each `Detection` validates camera, timestamp, class, confidence, bounding box, and model metadata. Each `VisualTrack` has a generated visual-session identifier and a `DETECTED`, `TRACKED`, `TEMPORARILY_LOST`, or `ENDED` lifecycle. Track identifiers are not employee identities; identity is not inferred or attached.
 
-The authenticated `/api/v1/system/ai-health` endpoint exposes model and per-camera pipeline states. `/api/v1/system/pipelines` exposes pipeline status only. No event, PPE, proximity, fall, fire, evidence, or alert generation is connected in Phase 4.
+The authenticated `/api/v1/system/ai-health` endpoint exposes model and per-camera pipeline states. `/api/v1/system/pipelines` exposes pipeline status only. `/api/v1/events` reads persisted event records; `/api/v1/events/{event_id}/transitions` enforces allowed workflow transitions and records transition history. No event generation, PPE model, proximity, fall, fire, evidence, or notification engine is connected.
+
+Standalone `TemporalVerifier`, polygon membership, and PPE rule interpretation primitives are present. They require explicitly supplied rules/observations and do not generate events. Generic temporal values must be marked `ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION`; no IGL SOP thresholds or zone geometry are present.
 
 ## Configuration and Validation Boundaries
 
-- **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association, and camera-to-pipeline wiring.
+- **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association, camera-to-pipeline wiring, continuous camera-health worker, and auditable event state transition service.
+- **PARTIALLY IMPLEMENTED:** Temporal verification, zone geometry assessment, and PPE rule evaluation as independent non-event-generating primitives.
 - **PARTIALLY IMPLEMENTED:** File and RTSP acquisition code. No actual video source was available for end-to-end verification.
 - **NOT_CONFIGURED:** Model weights are absent; model health reports `MODEL_NOT_CONFIGURED`.
 - **NOT_VALIDATED:** No IGL layouts, cameras, SOPs, or labeled IGL data were supplied or assessed.

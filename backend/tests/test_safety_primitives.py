@@ -1,0 +1,73 @@
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import sys
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.engine.temporal_verifier import TemporalVerifier, VerificationPolicy
+from app.services.ppe_rules import assess_ppe_observation
+from app.services.zone_engine import evaluate_zone_membership, point_in_polygon
+
+
+def test_temporal_verifier_requires_persistence_and_duration():
+    verifier = TemporalVerifier(VerificationPolicy(
+        minimum_observations=3,
+        minimum_duration_seconds=2,
+        confidence_threshold=0.7,
+        maximum_gap_seconds=1.5,
+        threshold_source="ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION",
+    ))
+    start = datetime.now(timezone.utc)
+    assert verifier.observe("test-track", start, True, 0.9).state == "DETECTED"
+    assert verifier.observe("test-track", start + timedelta(seconds=1), True, 0.9).state == "PERSISTED"
+    result = verifier.observe("test-track", start + timedelta(seconds=2), True, 0.9)
+    assert result.state == "VERIFIED"
+    assert result.threshold_source == "ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION"
+
+
+def test_temporal_verifier_invalidates_gap_and_marks_missing_evidence():
+    verifier = TemporalVerifier(VerificationPolicy(2, 0, 0.5, 1, "ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION"))
+    start = datetime.now(timezone.utc)
+    verifier.observe("track", start, True, 0.8)
+    assert verifier.observe("track", start + timedelta(seconds=2), True, 0.8).state == "DETECTED"
+    assert verifier.observe("track", start + timedelta(seconds=3), False, 1.0).state == "INVALIDATED"
+    assert verifier.observe("track", start + timedelta(seconds=4), None, None).state == "NOT_ASSESSABLE"
+
+
+def test_configured_temporal_rule_requires_a_provenance_reference():
+    with pytest.raises(ValueError, match="source reference"):
+        VerificationPolicy(2, 1, 0.5, 1, "CONFIGURED")
+
+
+def test_zone_membership_uses_supplied_polygon_only():
+    polygon = ((0, 0), (10, 0), (10, 10), (0, 10))
+    assert point_in_polygon((5, 5), polygon) is True
+    assert point_in_polygon((15, 5), polygon) is False
+    assert evaluate_zone_membership("test-zone", None, (5, 5)).state == "NOT_CONFIGURED"
+    assert evaluate_zone_membership("test-zone", polygon, None).state == "NOT_ASSESSABLE"
+    assert evaluate_zone_membership("test-zone", polygon, (5, 5)).inside is True
+    assert point_in_polygon((5, 5), ((0, 0), (1, 1))) is None
+
+
+def test_ppe_rule_requires_validated_model_and_visible_region():
+    common = {
+        "ppe_type": "TEST_PPE_CLASS",
+        "present": True,
+        "confidence": 0.99,
+        "minimum_confidence": 0.5,
+    }
+    unvalidated = assess_ppe_observation(
+        **common, region_visible=True, model_configured=True, model_validated_for_task=False
+    )
+    assert unvalidated.finding == "NOT_VALIDATED"
+    not_visible = assess_ppe_observation(
+        **common, region_visible=False, model_configured=True, model_validated_for_task=True
+    )
+    assert not_visible.finding == "NOT_ASSESSABLE"
+    observed = assess_ppe_observation(
+        **common, region_visible=True, model_configured=True, model_validated_for_task=True
+    )
+    assert observed.finding == "PPE_PRESENT"
+    assert observed.observation_state == "POSSIBLE"

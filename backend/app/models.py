@@ -311,6 +311,7 @@ class Event(Base):
     near_misses = relationship("NearMiss", back_populates="event")
     corrective_actions = relationship("CorrectiveAction", back_populates="event")
     notifications = relationship("Notification", back_populates="event")
+    state_transitions = relationship("EventStateTransition", back_populates="event", cascade="all, delete-orphan")
 
 
 class EventEvidence(Base):
@@ -328,6 +329,22 @@ class EventEvidence(Base):
 
     # Relationships
     event = relationship("Event", back_populates="evidences")
+
+
+class EventStateTransition(Base):
+    """Auditable record of an allowed event workflow transition."""
+    __tablename__ = "event_state_transitions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    event_id = Column(String(36), ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    previous_state = Column(String(50), nullable=False)
+    new_state = Column(String(50), nullable=False)
+    reason = Column(Text, nullable=False)
+    transitioned_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    event = relationship("Event", back_populates="state_transitions")
+    user = relationship("User")
 
 
 # ============================================================================

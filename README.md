@@ -2,9 +2,10 @@
 
 ## Current Status
 
-- **IMPLEMENTED:** FastAPI authentication/camera APIs, SQLAlchemy domain models, bounded rolling frame buffer, explicit-path Ultralytics adapter, detection validation, visual-only IoU tracking, and per-camera pipeline health.
+- **IMPLEMENTED:** FastAPI authentication/camera APIs, SQLAlchemy domain models, bounded rolling frame buffer, explicit-path Ultralytics adapter, detection validation, visual-only IoU tracking, continuous observed camera-health polling, and audited event workflow transitions.
 - **PARTIALLY IMPLEMENTED:** RTSP and prerecorded-file ingestion are connected to the Phase 4 pipeline, but no real source has been tested in this workspace.
 - **NOT_CONFIGURED:** No model weights are present. The default model state is `MODEL_NOT_CONFIGURED`; no detections are fabricated and weights are never downloaded automatically.
+- **PARTIALLY IMPLEMENTED:** Temporal verification, polygon membership, and PPE-rule interpretation are standalone software primitives; they are not connected to a real safety detector or event generation.
 - **NOT_VALIDATED:** No IGL validation data or metrics are available. This repository does not claim production readiness for Phases 1–3.
 
 No authorized IGL camera footage, plant layout, PPE SOP dataset, or labeled IGL validation dataset is currently present in this workspace.
