@@ -4,16 +4,28 @@ Uses SQLAlchemy with SQLite for development; PostgreSQL-ready for production.
 """
 import os
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from typing import Generator
+
+try:
+    from app.config import settings
+except ImportError:
+    from backend.app.config import settings
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{os.path.join(DATA_DIR, 'database.db')}")
+DATABASE_URL = settings.DATABASE_URL
+database_url = make_url(DATABASE_URL)
+if database_url.drivername.startswith("sqlite") and database_url.database not in (None, ":memory:"):
+    if not os.path.isabs(database_url.database):
+        DATABASE_URL = database_url.set(
+            database=os.path.join(PROJECT_ROOT, database_url.database)
+        ).render_as_string(hide_password=False)
 
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
@@ -23,7 +35,7 @@ engine = create_engine(
     DATABASE_URL,
     connect_args=connect_args,
     poolclass=StaticPool if DATABASE_URL.startswith("sqlite") else None,
-    echo=os.getenv("SQLALCHEMY_ECHO", "false").lower() == "true",
+    echo=settings.SQLALCHEMY_ECHO,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

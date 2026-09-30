@@ -1,0 +1,15 @@
+alembic==1.18.4
+bcrypt==5.0.0
+fastapi==0.141.1
+httpx==0.28.1
+numpy==2.5.0
+opencv-python==4.14.0.94
+pydantic==2.13.4
+PyJWT==2.11.0
+pydantic-settings==2.14.2
+pytest==8.4.2
+SQLAlchemy==2.0.46
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.114
+uvicorn==0.52.0

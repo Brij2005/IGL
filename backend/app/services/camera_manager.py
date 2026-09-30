@@ -53,7 +53,7 @@ class CameraManager:
             is_frozen=False,
             is_black=False,
             image_quality_score=1.0,
-            inference_status="IDLE"
+            inference_status="NOT_CONFIGURED"
         )
         db.add(health)
         db.commit()

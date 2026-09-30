@@ -8,19 +8,24 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-# Ensure backend directory is in sys.path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Ensure the project and backend packages resolve from either supported launch directory.
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
+sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, BACKEND_DIR)
 
 try:
     from app.config import settings
     from app.database import init_db, SessionLocal
     from app.models import Role
     from app.api import api_router
+    from app.services.inference_pipeline import pipeline_manager
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import init_db, SessionLocal
     from backend.app.models import Role
     from backend.app.api import api_router
+    from backend.app.services.inference_pipeline import pipeline_manager
 
 
 DEFAULT_ROLES = [
@@ -72,6 +77,7 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events management."""
     # Startup: Initialize DB tables and seed roles
     engine = init_db()
+    pipeline_manager.prepare_model()
     db = SessionLocal()
     try:
         seed_default_roles(db)
@@ -79,6 +85,7 @@ async def lifespan(app: FastAPI):
         db.close()
     yield
     # Shutdown
+    pipeline_manager.stop_all()
     engine.dispose()
 
 

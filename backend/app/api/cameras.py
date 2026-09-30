@@ -11,7 +11,7 @@ try:
     from app.schemas_camera import CameraCreate, CameraUpdate, CameraOut, CameraHealthOut
     from app.services.camera_manager import CameraManager
     from app.services.health_monitor import health_monitor
-    from app.services.video_ingestion import ingestion_manager
+    from app.services.inference_pipeline import pipeline_manager
     from app.auth import get_current_active_user, require_role
 except ImportError:
     from backend.app.database import get_db
@@ -19,7 +19,7 @@ except ImportError:
     from backend.app.schemas_camera import CameraCreate, CameraUpdate, CameraOut, CameraHealthOut
     from backend.app.services.camera_manager import CameraManager
     from backend.app.services.health_monitor import health_monitor
-    from backend.app.services.video_ingestion import ingestion_manager
+    from backend.app.services.inference_pipeline import pipeline_manager
     from backend.app.auth import get_current_active_user, require_role
 
 
@@ -38,7 +38,7 @@ def register_camera(
     try:
         camera = CameraManager.create_camera(db, camera_in)
         # Start ingestion stream reader
-        ingestion_manager.start_stream(camera.id, camera.stream_url, camera.fps)
+        pipeline_manager.start_stream(camera.id, camera.stream_url, camera.fps)
         return camera
     except ValueError as e:
         raise HTTPException(
@@ -98,9 +98,9 @@ def update_camera(
         
     # Restart ingestion worker if active
     if camera.is_active:
-        ingestion_manager.start_stream(camera.id, camera.stream_url, camera.fps)
+        pipeline_manager.start_stream(camera.id, camera.stream_url, camera.fps)
     else:
-        ingestion_manager.stop_stream(camera.id)
+        pipeline_manager.stop_stream(camera.id)
         
     return camera
 
@@ -120,7 +120,7 @@ def deactivate_camera(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Camera not found"
         )
-    ingestion_manager.stop_stream(camera_id)
+    pipeline_manager.stop_stream(camera_id)
 
 
 @router.get("/{camera_id}/health", response_model=CameraHealthOut)

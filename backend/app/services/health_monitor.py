@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 try:
     from app.models import Camera, CameraHealth, Event
     from app.services.video_ingestion import StreamReader, ingestion_manager
+    from app.services.inference_pipeline import pipeline_manager
 except ImportError:
     from backend.app.models import Camera, CameraHealth, Event
     from backend.app.services.video_ingestion import StreamReader, ingestion_manager
+    from backend.app.services.inference_pipeline import pipeline_manager
 
 
 class CameraHealthMonitor:
@@ -88,7 +90,7 @@ class CameraHealthMonitor:
 
         if not camera.is_active:
             health.status = "OFFLINE"
-            health.inference_status = "STOPPED"
+            health.inference_status = "NOT_RUNNING"
             health.health_timestamp = now
             db.commit()
             db.refresh(health)
@@ -150,7 +152,8 @@ class CameraHealthMonitor:
         health.is_frozen = is_frozen
         health.image_quality_score = quality_score
         health.health_timestamp = now
-        health.inference_status = "RUNNING"
+        pipeline_states = pipeline_manager.pipeline_status(camera.id)
+        health.inference_status = pipeline_states[0]["inference_status"] if pipeline_states else "NOT_RUNNING"
 
         if is_black or is_frozen:
             health.status = "UNRELIABLE"

@@ -3,7 +3,29 @@ Pydantic schemas for Camera Management and Real-time Telemetry.
 """
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+
+_CREDENTIAL_QUERY_KEYS = {"auth", "key", "pass", "password", "pwd", "secret", "token", "user", "username"}
+
+
+def sanitize_stream_url(stream_url: str) -> str:
+    """Remove URL userinfo and redact credential-like query parameters."""
+    try:
+        parsed = urlsplit(stream_url)
+        hostname = parsed.hostname or ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        if parsed.port is not None:
+            hostname = f"{hostname}:{parsed.port}"
+        query = [
+            (key, "REDACTED" if key.lower() in _CREDENTIAL_QUERY_KEYS else value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+        return urlunsplit((parsed.scheme, hostname, parsed.path, urlencode(query), ""))
+    except ValueError:
+        return "CONFIGURATION_REQUIRED"
 
 
 class CameraBase(BaseModel):
@@ -57,3 +79,8 @@ class CameraOut(CameraBase):
     health: Optional[CameraHealthOut] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("stream_url")
+    @classmethod
+    def sanitize_stream_url_field(cls, value: str) -> str:
+        return sanitize_stream_url(value)
