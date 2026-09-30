@@ -11,6 +11,7 @@ try:
     from app.api.evidence import router as evidence_router
     from app.api.analytics import router as analytics_router
     from app.api.notifications import router as notifications_router
+    from app.api.configuration import router as configuration_router
 except ImportError:
     from backend.app.api.auth import router as auth_router
     from backend.app.api.cameras import router as cameras_router
@@ -19,6 +20,7 @@ except ImportError:
     from backend.app.api.evidence import router as evidence_router
     from backend.app.api.analytics import router as analytics_router
     from backend.app.api.notifications import router as notifications_router
+    from backend.app.api.configuration import router as configuration_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router, prefix="/auth", tags=["Authentication & RBAC"])
@@ -28,3 +30,4 @@ api_router.include_router(events_router, prefix="/events", tags=["Safety Events"
 api_router.include_router(evidence_router, prefix="", tags=["Event Evidence"])
 api_router.include_router(analytics_router, prefix="/analytics", tags=["Database Analytics"])
 api_router.include_router(notifications_router, prefix="/notifications", tags=["Notifications"])
+api_router.include_router(configuration_router, prefix="/configuration", tags=["Plant Configuration"])

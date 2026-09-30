@@ -1,0 +1,11 @@
+configuration_status: NOT_CONFIGURED
+records: []
+record_schema:
+  id: null
+  zone_id: null
+  feature_module: null
+  rule_type: null
+  threshold: null
+  threshold_source: ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION
+  source_reference: null
+  validation_status: NOT_VALIDATED

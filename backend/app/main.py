@@ -47,7 +47,8 @@ DEFAULT_ROLES = [
         "description": "Safety officer managing events, incidents and corrective actions",
         "permissions_json": [
             "events:view", "events:acknowledge", "events:assign",
-            "incidents:manage", "corrective_actions:manage", "analytics:view"
+            "incidents:manage", "corrective_actions:manage", "analytics:view",
+            "plants:view", "zones:view"
         ]
     },
     {
@@ -77,6 +78,9 @@ def seed_default_roles(db: Session):
                 permissions_json=role_data["permissions_json"]
             )
             db.add(new_role)
+        else:
+            existing.description = role_data["description"]
+            existing.permissions_json = role_data["permissions_json"]
     db.commit()
 
 
@@ -143,6 +147,7 @@ def root():
         "database": system_health["database"],
         "migrations": system_health["migrations"],
         "model_status": system_health["model"]["status"],
+        "igl_configuration_status": system_health["igl_configuration_status"],
         "platform": settings.PROJECT_NAME,
         "version": settings.VERSION,
         "docs_url": "/docs"

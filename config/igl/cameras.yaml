@@ -1,0 +1,11 @@
+configuration_status: NOT_CONFIGURED
+records: []
+record_schema:
+  id: null
+  zone_id: null
+  name: null
+  source_type: null
+  source_secret_environment_variable: null
+  configured_fps: null
+  configured_resolution: null
+  placement_reference: null

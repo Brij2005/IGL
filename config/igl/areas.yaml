@@ -1,0 +1,8 @@
+configuration_status: NOT_CONFIGURED
+records: []
+record_schema:
+  id: null
+  plant_id: null
+  name: null
+  code: null
+  source_reference: null

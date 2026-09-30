@@ -6,25 +6,29 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 try:
     from app.config import settings
     from app.database import engine
+    from app.models import Plant
     from app.services.continuous_health import camera_health_worker
     from app.services.inference_pipeline import pipeline_manager
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import engine
+    from backend.app.models import Plant
     from backend.app.services.continuous_health import camera_health_worker
     from backend.app.services.inference_pipeline import pipeline_manager
 
 
 def collect_system_health() -> dict:
     database_state = "ONLINE"
+    plant_count = 0
     try:
         with engine.connect() as connection:
             connection.execute(select(1))
+            plant_count = connection.execute(select(func.count()).select_from(Plant)).scalar_one()
     except Exception:
         database_state = "UNAVAILABLE"
 
@@ -68,5 +72,6 @@ def collect_system_health() -> dict:
         "frontend_connectivity": frontend_state,
         "validation_status": "NOT_VALIDATED",
         "igl_validated": False,
+        "igl_configuration_status": "NOT_CONFIGURED" if plant_count == 0 else "CONFIGURED_NOT_VALIDATED",
         "subsystem_states": states,
     }

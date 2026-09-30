@@ -212,7 +212,10 @@ class PPERule(Base):
     zone_id = Column(String(36), ForeignKey("zones.id", ondelete="CASCADE"), nullable=True, index=True)
     ppe_type = Column(String(50), nullable=False)  # HELMET, SAFETY_VEST, GOGGLES, GLOVES, SAFETY_FOOTWEAR, RESPIRATOR, FACE_SHIELD, EAR_PROTECTION
     is_mandatory = Column(Boolean, default=True, nullable=False)
-    min_confidence = Column(Float, default=0.75, nullable=False)
+    min_confidence = Column(Float, nullable=True)
+    source_reference = Column(String(500), nullable=True)
+    threshold_source = Column(String(80), default="ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION", nullable=False)
+    validation_status = Column(String(50), default="NOT_VALIDATED", nullable=False)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 

@@ -1,0 +1,11 @@
+configuration_status: NOT_CONFIGURED
+records: []
+record_schema:
+  id: null
+  area_id: null
+  name: null
+  code: null
+  zone_type: null
+  polygon_coordinates: null
+  coordinate_reference: null
+  source_reference: null

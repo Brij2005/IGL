@@ -9,6 +9,7 @@ const labels = {
   cameras: ["MONITOR / INPUTS", "Cameras"],
   events: ["REVIEW / WORKFLOW", "Events"],
   evidence: ["REVIEW / EVENT MATERIAL", "Evidence"],
+  configuration: ["OPERATOR-SUPPLIED / NO DEFAULTS", "Configuration"],
   analytics: ["RECORDS / SUMMARY", "Analytics"],
   system: ["SUBSYSTEMS / STATUS", "System health"],
   audit: ["SECURITY / ACTIVITY", "Audit log"],
@@ -222,6 +223,62 @@ async function renderAnalytics() {
     <div class="section"><div class="section-head"><h2>Measurement boundary</h2><span>NO SYNTHETIC CHARTS</span></div><div class="section-body">${stateRows([["Detection accuracy", "NOT_MEASURED"], ["Tracking accuracy", "NOT_MEASURED"], ["IGL validation", "NOT_VALIDATED"]])}</div></div>`;
 }
 
+async function renderConfiguration() {
+  const [plants, areas, zones, rules] = await Promise.all([
+    request("/configuration/plants"),
+    request("/configuration/areas"),
+    request("/configuration/zones"),
+    request("/configuration/ppe-rules"),
+  ]);
+  const options = (items, label) => items.length
+    ? items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(label(item))}</option>`).join("")
+    : "";
+  const currentState = (title, items, renderer) => `<section class="section"><div class="section-head"><h2>${escapeHtml(title)}</h2><span>${items.length} RECORDS</span></div>${items.length ? `<div class="table-wrap">${renderer(items)}</div>` : `<div class="empty-state"><div><strong>No ${escapeHtml(title.toLowerCase())} configured.</strong>Nothing is pre-populated for IGL.</div></div>`}</section>`;
+  const iglConfigurationStatus = plants.length ? "CONFIGURED_NOT_VALIDATED" : "NOT_CONFIGURED";
+  content.innerHTML = `<div class="status-banner"><div><strong>IGL_CONFIGURATION_STATUS = ${escapeHtml(iglConfigurationStatus)}</strong><span>These forms store operator-supplied configuration only. No IGL layout or SOP is assumed.</span></div></div>
+    <div class="content-grid configuration-grid">
+      <form class="section config-form" id="plant-config-form"><div class="section-head"><h2>Plant</h2><span>AUTHORIZED DATA</span></div><div class="section-body">
+        <label>Plant name<input name="name" required maxlength="100"></label><label>Plant code<input name="code" required maxlength="50"></label><label>Location<input name="location" maxlength="255"></label><label>Description<input name="description"></label><button class="inline-button" type="submit">Add plant</button>
+      </div></form>
+      <form class="section config-form" id="area-config-form"><div class="section-head"><h2>Area</h2><span>AUTHORIZED DATA</span></div><div class="section-body">
+        <label>Parent plant<select name="plant_id" required>${options(plants, (item) => `${item.name} (${item.code})`)}</select></label><label>Area name<input name="name" required maxlength="100"></label><label>Area code<input name="code" required maxlength="50"></label><label>Description<input name="description"></label><button class="inline-button" type="submit" ${plants.length ? "" : "disabled"}>Add area</button>
+      </div></form>
+      <form class="section config-form" id="zone-config-form"><div class="section-head"><h2>Zone</h2><span>POLYGON OPTIONAL</span></div><div class="section-body">
+        <label>Parent area<select name="area_id" required>${options(areas, (item) => `${item.name} (${item.code})`)}</select></label><label>Zone name<input name="name" required maxlength="100"></label><label>Zone code<input name="code" required maxlength="50"></label><label>Zone type<select name="zone_type" required><option value="WORK_AREA">WORK_AREA</option><option value="RESTRICTED">RESTRICTED</option><option value="HAZARDOUS">HAZARDOUS</option><option value="PPE_MANDATORY">PPE_MANDATORY</option><option value="VEHICLE_ZONE">VEHICLE_ZONE</option><option value="EXCLUSION_ZONE">EXCLUSION_ZONE</option></select></label><label>Configured polygon JSON<textarea name="geometry_json" rows="3" placeholder="[[x1,y1],[x2,y2],[x3,y3]]"></textarea></label><button class="inline-button" type="submit" ${areas.length ? "" : "disabled"}>Add zone</button>
+      </div></form>
+      <form class="section config-form" id="ppe-config-form"><div class="section-head"><h2>PPE rule</h2><span>NOT VALIDATED</span></div><div class="section-body">
+        <label>Zone<select name="zone_id" required>${options(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>PPE type from authorized SOP<input name="ppe_type" required maxlength="50"></label><label>Threshold source<select name="threshold_source"><option value="ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION">ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION</option><option value="CONFIGURED">CONFIGURED</option></select></label><label>Confidence threshold<input name="min_confidence" type="number" min="0" max="1" step="0.01"></label><label>Source reference<input name="source_reference" maxlength="500" placeholder="Required when source is CONFIGURED"></label><label class="checkbox-label"><input name="is_mandatory" type="checkbox"> Mandatory</label><button class="inline-button" type="submit" ${zones.length ? "" : "disabled"}>Add PPE rule</button>
+      </div></form>
+    </div>
+    <div class="content-grid configuration-records">
+      ${currentState("Plants", plants, (items) => `<table><thead><tr><th>Name</th><th>Code</th><th>Location</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.location || "NOT_AVAILABLE")}</td></tr>`).join("")}</tbody></table>`)}
+      ${currentState("Zones", zones, (items) => `<table><thead><tr><th>Name</th><th>Type</th><th>Geometry</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.zone_type)}</td><td>${item.geometry_json ? "CONFIGURED" : "NOT_CONFIGURED"}</td></tr>`).join("")}</tbody></table>`)}
+      ${currentState("PPE rules", rules, (items) => `<table><thead><tr><th>PPE type</th><th>Threshold source</th><th>Status</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.ppe_type)}</td><td>${escapeHtml(item.threshold_source)}</td><td>${escapeHtml(item.validation_status)}</td></tr>`).join("")}</tbody></table>`)}
+    </div>`;
+  content.querySelectorAll(".config-form").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(form).entries());
+    const endpoint = form.id === "plant-config-form" ? "/configuration/plants"
+      : form.id === "area-config-form" ? "/configuration/areas"
+        : form.id === "zone-config-form" ? "/configuration/zones" : "/configuration/ppe-rules";
+    if (form.id === "zone-config-form") {
+      try { values.geometry_json = values.geometry_json.trim() ? JSON.parse(values.geometry_json) : null; }
+      catch { showMessage("Polygon JSON is invalid."); return; }
+    }
+    if (form.id === "ppe-config-form") {
+      values.is_mandatory = form.elements.is_mandatory.checked;
+      values.min_confidence = values.min_confidence === "" ? null : Number(values.min_confidence);
+      values.source_reference = values.source_reference || null;
+    }
+    Object.keys(values).forEach((key) => { if (values[key] === "") values[key] = null; });
+    try {
+      await request(endpoint, { method: "POST", body: JSON.stringify(values) });
+      showMessage("Configuration record saved and audited.");
+      await renderConfiguration();
+    } catch (error) { showMessage(error.message); }
+  }));
+}
+
 async function renderSystem() {
   const health = await request("/system/health");
   const model = health.model || {};
@@ -241,7 +298,7 @@ async function renderAudit() {
   content.innerHTML = `<section class="section"><div class="section-head"><h2>Audit activity</h2><span>LAST 100 RECORDS</span></div>${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Resource</th><th>Actor</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHtml(formatDate(row.timestamp))}</td><td>${escapeHtml(row.action)}</td><td>${escapeHtml(row.resource_type)} ${escapeHtml(row.resource_id || "")}</td><td>${escapeHtml(row.user_id || "SYSTEM")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No audit records available.</strong></div></div>`}</section>`;
 }
 
-const renderers = { overview: renderOverview, cameras: renderCameras, events: renderEvents, evidence: renderEvidence, analytics: renderAnalytics, system: renderSystem, audit: renderAudit, unavailable: async () => { content.innerHTML = unavailableMarkup(); } };
+const renderers = { overview: renderOverview, cameras: renderCameras, events: renderEvents, evidence: renderEvidence, configuration: renderConfiguration, analytics: renderAnalytics, system: renderSystem, audit: renderAudit, unavailable: async () => { content.innerHTML = unavailableMarkup(); } };
 
 async function navigate(view) {
   currentView = view;

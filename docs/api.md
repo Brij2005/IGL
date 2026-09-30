@@ -9,6 +9,7 @@ All application routes are under `/api/v1`. Authentication uses a bearer JWT.
 - `GET /events` reads persisted events; `POST /events/{event_id}/transitions` applies only allowed workflow transitions and records actor/reason history.
 - `GET /events/{event_id}/evidence` lists evidence linked to a persisted event; `GET /events/{event_id}/evidence/{evidence_id}/content` serves an existing in-root file only.
 - `GET /notifications` lists the authenticated user's notifications; `POST /notifications/events/{event_id}` queues an in-app item or returns external channels as `NOT_CONFIGURED`.
+- `GET/POST /configuration/plants`, `/configuration/areas`, `/configuration/zones`, and `/configuration/ppe-rules` provide authenticated operator-supplied configuration. Writes are audited. Configured PPE thresholds require a source reference and remain `NOT_VALIDATED`.
 - `GET /analytics/summary` returns counts from database records and `NOT_MEASURED` accuracy state.
 - `GET /system/ai-health`, `GET /system/pipelines`, and `GET /system/health` expose actual model/pipeline/system state.
 

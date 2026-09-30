@@ -1,0 +1,8 @@
+configuration_status: NOT_CONFIGURED
+records: []
+record_schema:
+  id: null
+  zone_id: null
+  equipment_type: null
+  name: null
+  source_reference: null

@@ -1,0 +1,9 @@
+configuration_status: NOT_CONFIGURED
+records: []
+record_schema:
+  id: null
+  event_type: null
+  recipient_role: null
+  channel: null
+  delay_seconds: null
+  source_reference: null

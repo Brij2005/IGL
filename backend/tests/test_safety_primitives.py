@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.engine.temporal_verifier import TemporalVerifier, VerificationPolicy
 from app.services.ppe_rules import assess_ppe_observation
 from app.services.zone_engine import evaluate_zone_membership, point_in_polygon
+from app.schemas_configuration import PPERuleCreate, ZoneCreate
 
 
 def test_temporal_verifier_requires_persistence_and_duration():
@@ -71,3 +72,33 @@ def test_ppe_rule_requires_validated_model_and_visible_region():
     )
     assert observed.finding == "PPE_PRESENT"
     assert observed.observation_state == "POSSIBLE"
+
+
+def test_zone_and_ppe_configuration_require_real_operator_inputs():
+    zone = ZoneCreate(
+        area_id="operator-supplied-area",
+        name="Operator supplied zone",
+        code="OP-ZONE-1",
+        zone_type="WORK_AREA",
+        geometry_json=[[0, 0], [1, 0], [1, 1]],
+    )
+    assert zone.geometry_json == [[0, 0], [1, 0], [1, 1]]
+    with pytest.raises(ValueError, match="coordinate pairs"):
+        ZoneCreate(
+            area_id="operator-supplied-area",
+            name="Invalid zone",
+            code="OP-ZONE-2",
+            zone_type="RESTRICTED",
+            geometry_json=[[0, 0], [1, 1]],
+        )
+    default_rule = PPERuleCreate(zone_id="operator-zone", ppe_type="operator-configured-item", is_mandatory=True)
+    assert default_rule.min_confidence is None
+    assert default_rule.threshold_source == "ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION"
+    with pytest.raises(ValueError, match="source reference"):
+        PPERuleCreate(
+            zone_id="operator-zone",
+            ppe_type="operator-configured-item",
+            is_mandatory=True,
+            min_confidence=0.8,
+            threshold_source="CONFIGURED",
+        )
