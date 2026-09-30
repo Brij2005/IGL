@@ -5,11 +5,11 @@ from sqlalchemy.orm import Session
 try:
     from app.auth import require_permission
     from app.database import get_db
-    from app.models import Camera, CameraHealth, CorrectiveAction, Event, Incident, NearMiss, User
+    from app.models import Camera, CameraHealth, CorrectiveAction, Event, Incident, NearMiss, Plant, User
 except ImportError:
     from backend.app.auth import require_permission
     from backend.app.database import get_db
-    from backend.app.models import Camera, CameraHealth, CorrectiveAction, Event, Incident, NearMiss, User
+    from backend.app.models import Camera, CameraHealth, CorrectiveAction, Event, Incident, NearMiss, Plant, User
 
 
 router = APIRouter()
@@ -23,6 +23,7 @@ def get_summary_analytics(
     camera_count = db.query(Camera.id).count()
     return {
         "data_status": "AVAILABLE" if camera_count else "NO_DATA",
+        "plant_count": db.query(Plant.id).count(),
         "camera_count": camera_count,
         "online_camera_count": db.query(CameraHealth.camera_id).filter(CameraHealth.status == "ONLINE").count(),
         "event_count": db.query(Event.id).count(),

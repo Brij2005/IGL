@@ -28,7 +28,7 @@ The default development database is `data/database.db`. Never delete or recreate
 
 ## Phase 4 Health
 
-After authentication, inspect `GET /api/v1/system/ai-health` and `GET /api/v1/system/pipelines`. An offline source, unavailable model, or inference error is reported as a non-running/unavailable state; it is not treated as safe monitoring. Camera responses redact URL user information and credential-like query values.
+After authentication, inspect `GET /api/v1/system/health`, `GET /api/v1/system/ai-health`, and `GET /api/v1/system/pipelines`. An offline source, unavailable model, or inference error is reported as a non-running/unavailable state; it is not treated as safe monitoring. Camera responses strip user information and all query/fragment data; credential-bearing sources are encrypted at rest when `CAMERA_URL_ENCRYPTION_KEY` is configured.
 
 The platform is an advisory layer. It does not control PLCs, machinery, valves, interlocks, or emergency systems. See [docs/architecture.md](docs/architecture.md) and [docs/ai_validation.md](docs/ai_validation.md).
 
@@ -43,4 +43,4 @@ python scripts/run_inference.py --duration-seconds 30
 
 The second command reads `RTSP_URL` from the environment without echoing it. A JSON report is written under `data/validation_reports/`, which is git-ignored. No model weights are downloaded. Missing or invalid inputs fail with explicit status codes. See [docs/validation.md](docs/validation.md) for setup, metrics, and evidence requirements.
 
-The frontend is not implemented yet. The current backend exposes truthful camera, event, evidence, notification, analytics, model, and system-health API surfaces; it does not provide PPE/event inference or IGL validation. See [docs/api.md](docs/api.md) and [docs/igl_configuration.md](docs/igl_configuration.md).
+The frontend is a partial operational dashboard for actual login, camera, event, evidence, analytics, configuration, audit, and system-health APIs. It does not provide live video or complete user administration, nor does the backend provide PPE/event inference or IGL validation. See [docs/api.md](docs/api.md) and [docs/igl_configuration.md](docs/igl_configuration.md).
