@@ -93,7 +93,10 @@ def test_camera_crud_api(client, admin_auth_headers, test_db):
     camera_data = resp.json()
     camera_id = camera_data["id"]
     assert camera_data["code"] == "CAM-KAS-RB-01"
-    assert camera_data["health"]["status"] == "UNKNOWN"
+    assert camera_data["health"]["status"] == "CONFIGURED"
+    assert camera_data["health"]["measured_fps"] is None
+    assert camera_data["health"]["observed_resolution"] is None
+    assert camera_data["health"]["brightness_score"] is None
 
     # 2. List Cameras
     list_resp = client.get("/api/v1/cameras", headers=admin_auth_headers)

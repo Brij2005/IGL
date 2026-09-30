@@ -98,9 +98,8 @@ class CameraHealthMonitor:
 
         # Check stream worker status
         if reader is None or not reader.is_connected:
-            health.status = "OFFLINE"
-            health.fps = 0.0
-            health.inference_status = "UNAVAILABLE"
+            health.status = "CONNECTING" if reader and reader.status == "STARTING" else "OFFLINE"
+            health.inference_status = pipeline_manager.model_health()["status"] if reader is None else "NOT_RUNNING"
             health.health_timestamp = now
             
             # Generate CAMERA_FAILURE safety event
@@ -118,8 +117,8 @@ class CameraHealthMonitor:
         # Stream is connected: evaluate latest frame
         latest = reader.get_latest_frame()
         if latest is None:
-            health.status = "DEGRADED"
-            health.fps = reader.current_fps
+            health.status = "CONNECTING"
+            health.inference_status = "NOT_RUNNING"
             health.health_timestamp = now
             db.commit()
             db.refresh(health)
@@ -130,7 +129,7 @@ class CameraHealthMonitor:
         # Check stream timeout (> 5.0 seconds since last frame)
         time_since_frame = (now - frame_ts).total_seconds()
         if time_since_frame > 5.0:
-            health.status = "OFFLINE"
+            health.status = "TIMEOUT"
             health.health_timestamp = now
             self._dispatch_camera_failure_event(
                 db=db,
@@ -147,7 +146,13 @@ class CameraHealthMonitor:
         is_frozen = self.check_frozen_frame(camera.id, frame)
 
         health.last_frame_timestamp = frame_ts
-        health.fps = reader.current_fps
+        health.measured_fps = reader.current_fps if reader.current_fps > 0 else None
+        health.frame_latency_ms = max(time_since_frame * 1000.0, 0.0)
+        health.observed_resolution = f"{frame.shape[1]}x{frame.shape[0]}"
+        health.dropped_frames = reader.dropped_frames_count
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        health.brightness_score = float(np.mean(gray) / 255.0)
+        health.sharpness_score = quality_score
         health.is_black = is_black
         health.is_frozen = is_frozen
         health.image_quality_score = quality_score
@@ -156,7 +161,7 @@ class CameraHealthMonitor:
         health.inference_status = pipeline_states[0]["inference_status"] if pipeline_states else "NOT_RUNNING"
 
         if is_black or is_frozen:
-            health.status = "UNRELIABLE"
+            health.status = "BLACK_FRAME" if is_black else "FROZEN"
             reason = "Black frame detected" if is_black else "Frozen video frame detected"
             self._dispatch_camera_failure_event(
                 db=db,

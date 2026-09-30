@@ -47,13 +47,19 @@ class CameraManager:
         # Initialize CameraHealth telemetry record
         health = CameraHealth(
             camera_id=camera.id,
-            status="UNKNOWN",
+            status="CONFIGURED",
             fps=0.0,
             latency_ms=0.0,
             is_frozen=False,
             is_black=False,
-            image_quality_score=1.0,
-            inference_status="NOT_CONFIGURED"
+            image_quality_score=None,
+            inference_status="NOT_RUNNING",
+            measured_fps=None,
+            frame_latency_ms=None,
+            observed_resolution=None,
+            dropped_frames=None,
+            brightness_score=None,
+            sharpness_score=None,
         )
         db.add(health)
         db.commit()

@@ -136,10 +136,16 @@ class CameraHealth(Base):
     latency_ms = Column(Float, default=0.0, nullable=False)
     is_frozen = Column(Boolean, default=False, nullable=False)
     is_black = Column(Boolean, default=False, nullable=False)
-    image_quality_score = Column(Float, default=1.0, nullable=False)
+    image_quality_score = Column(Float, nullable=True)
     inference_status = Column(String(50), default="IDLE", nullable=False)
     health_timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    measured_fps = Column(Float, nullable=True)
+    frame_latency_ms = Column(Float, nullable=True)
+    observed_resolution = Column(String(20), nullable=True)
+    dropped_frames = Column(Integer, nullable=True)
+    brightness_score = Column(Float, nullable=True)
+    sharpness_score = Column(Float, nullable=True)
 
     # Relationships
     camera = relationship("Camera", back_populates="health")

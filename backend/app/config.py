@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     FRAME_BUFFER_RETENTION_SECONDS: float = 30.0
     FRAME_BUFFER_MAX_FRAMES: int = 100
     FRAME_BUFFER_MAX_BYTES: int = 67_108_864
+    CAMERA_HEALTH_INTERVAL_SECONDS: float = Field(default=5.0, gt=0, le=300)
 
     model_config = SettingsConfigDict(
         env_file=".env",

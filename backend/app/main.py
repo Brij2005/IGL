@@ -24,12 +24,14 @@ try:
     from app.models import Role
     from app.api import api_router
     from app.services.inference_pipeline import pipeline_manager
+    from app.services.continuous_health import camera_health_worker
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import engine, SessionLocal
     from backend.app.models import Role
     from backend.app.api import api_router
     from backend.app.services.inference_pipeline import pipeline_manager
+    from backend.app.services.continuous_health import camera_health_worker
 
 
 DEFAULT_ROLES = [
@@ -101,8 +103,10 @@ async def lifespan(app: FastAPI):
         seed_default_roles(db)
     finally:
         db.close()
+    camera_health_worker.start()
     yield
     # Shutdown
+    camera_health_worker.stop()
     pipeline_manager.stop_all()
     engine.dispose()
 

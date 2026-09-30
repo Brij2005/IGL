@@ -50,13 +50,14 @@ class CameraUpdate(BaseModel):
 class CameraHealthOut(BaseModel):
     id: str
     camera_id: str
-    status: str  # ONLINE, DEGRADED, OFFLINE, UNRELIABLE, UNKNOWN
+    status: str
     last_frame_timestamp: Optional[datetime] = None
-    fps: float
-    latency_ms: float
-    is_frozen: bool
-    is_black: bool
-    image_quality_score: float
+    measured_fps: Optional[float] = None
+    frame_latency_ms: Optional[float] = None
+    observed_resolution: Optional[str] = None
+    dropped_frames: Optional[int] = None
+    brightness_score: Optional[float] = None
+    sharpness_score: Optional[float] = None
     inference_status: str
     health_timestamp: datetime
     updated_at: datetime
