@@ -34,7 +34,7 @@ The platform is an advisory layer. It does not control PLCs, machinery, valves, 
 
 ## Run Real-Input Validation
 
-Provide one authorized source (`VIDEO_SOURCE` for a local video or `RTSP_URL` for an IP stream) and a readable local `.pt` checkpoint with explicit `MODEL_NAME` and `MODEL_VERSION` in `.env`. Set `MODEL_CONFIDENCE_THRESHOLD` for that model. Alternatively, pass a local file or credential-free URL with `--source`.
+Provide one authorized source (`VIDEO_SOURCE` for a local video or `RTSP_URL` for an IP stream) and a readable local `.pt` checkpoint with explicit `MODEL_NAME` and `MODEL_VERSION` in `.env`. Set `MODEL_CONFIDENCE_THRESHOLD` for that model. Set `CAMERA_URL_ENCRYPTION_KEY` before adding credential-bearing camera URLs. Alternatively, pass a local file or credential-free URL with `--source`.
 
 ```powershell
 python scripts/run_inference.py --source "C:\authorized\path\sample.mp4"
@@ -42,3 +42,5 @@ python scripts/run_inference.py --duration-seconds 30
 ```
 
 The second command reads `RTSP_URL` from the environment without echoing it. A JSON report is written under `data/validation_reports/`, which is git-ignored. No model weights are downloaded. Missing or invalid inputs fail with explicit status codes. See [docs/validation.md](docs/validation.md) for setup, metrics, and evidence requirements.
+
+The frontend is not implemented yet. The current backend exposes truthful camera, event, evidence, notification, analytics, model, and system-health API surfaces; it does not provide PPE/event inference or IGL validation. See [docs/api.md](docs/api.md) and [docs/igl_configuration.md](docs/igl_configuration.md).

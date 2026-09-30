@@ -146,6 +146,7 @@ def test_successful_report_assembly_uses_test_doubles_only(monkeypatch, tmp_path
         model_name = "test-model"
         model_version = "test-version"
         confidence_threshold = 0.5
+        device = "test-only"
         inference_count = 1
 
         @staticmethod

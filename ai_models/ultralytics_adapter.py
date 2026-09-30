@@ -21,6 +21,7 @@ class UltralyticsModelAdapter:
         model_name: str | None = None,
         model_version: str | None = None,
         confidence_threshold: float = 0.25,
+        device: str = "cpu",
     ) -> None:
         if not 0.0 <= confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between 0 and 1")
@@ -28,6 +29,7 @@ class UltralyticsModelAdapter:
         self.model_name = model_name or (self.weights_path.stem if self.weights_path else "UNCONFIGURED")
         self.model_version = model_version or "UNSPECIFIED"
         self.confidence_threshold = confidence_threshold
+        self.device = device
         self.classes: tuple[str, ...] = ()
         self.inference_latency_ms: float | None = None
         self.inference_count = 0
@@ -77,7 +79,7 @@ class UltralyticsModelAdapter:
             raise ValueError("Cannot run inference on an empty frame")
         started = time.perf_counter()
         try:
-            results = self._model.predict(frame, conf=self.confidence_threshold, verbose=False)
+            results = self._model.predict(frame, conf=self.confidence_threshold, device=self.device, verbose=False)
             detections: list[Detection] = []
             for result in results:
                 boxes = getattr(result, "boxes", None)
@@ -116,6 +118,7 @@ class UltralyticsModelAdapter:
             "model_version": self.model_version,
             "classes": list(self.classes),
             "confidence_threshold": self.confidence_threshold,
+            "device": self.device,
             "inference_latency_ms": self.inference_latency_ms,
             "average_inference_latency_ms": round(self._latency_total_ms / self.inference_count, 3) if self.inference_count else None,
             "inference_count": self.inference_count,

@@ -18,6 +18,10 @@ from sqlalchemy import (
     ForeignKey, Index, UniqueConstraint, CheckConstraint, JSON
 )
 from sqlalchemy.orm import relationship
+try:
+    from app.utils.encrypted_url import EncryptedCameraURL
+except ImportError:
+    from backend.app.utils.encrypted_url import EncryptedCameraURL
 
 try:
     from app.database import Base
@@ -107,7 +111,7 @@ class Camera(Base):
     zone_id = Column(String(36), ForeignKey("zones.id", ondelete="SET NULL"), nullable=True, index=True)
     name = Column(String(100), nullable=False)
     code = Column(String(50), unique=True, nullable=False, index=True)
-    stream_url = Column(String(500), nullable=False)
+    stream_url = Column(EncryptedCameraURL(1200), nullable=False)
     camera_type = Column(String(50), default="RTSP", nullable=False)  # RTSP, IP, PTZ, FIXED, USB, FILE
     fps = Column(Float, default=25.0, nullable=False)
     resolution = Column(String(20), default="1920x1080", nullable=False)
@@ -272,7 +276,7 @@ class Detection(Base):
     object_class = Column(String(50), nullable=False)
     confidence = Column(Float, nullable=False)
     bbox_json = Column(JSON, nullable=False)  # [x1, y1, x2, y2] normalized or pixel coords
-    observation_state = Column(String(50), default="CONFIRMED", nullable=False)  # CONFIRMED, POSSIBLE, NOT_ASSESSABLE, NOT_VALIDATED
+    observation_state = Column(String(50), default="NOT_VALIDATED", nullable=False)  # CONFIRMED, POSSIBLE, NOT_ASSESSABLE, NOT_VALIDATED
     metadata_json = Column(JSON, nullable=True)
 
     # Relationships
@@ -289,7 +293,7 @@ class Event(Base):
     zone_id = Column(String(36), ForeignKey("zones.id", ondelete="SET NULL"), nullable=True, index=True)
     track_id = Column(String(36), ForeignKey("tracks.id", ondelete="SET NULL"), nullable=True, index=True)
     event_type = Column(String(100), nullable=False, index=True)  # PPE_NON_COMPLIANCE, ZONE_ENTRY, NEAR_MISS, FALL, FIRE, SMOKE
-    observation_state = Column(String(50), default="CONFIRMED", nullable=False)  # CONFIRMED, POSSIBLE, NOT_ASSESSABLE, NOT_VALIDATED
+    observation_state = Column(String(50), default="NOT_VALIDATED", nullable=False)  # CONFIRMED, POSSIBLE, NOT_ASSESSABLE, NOT_VALIDATED
     severity = Column(String(20), default="MEDIUM", nullable=False, index=True)  # LOW, MEDIUM, HIGH, CRITICAL
     workflow_state = Column(String(50), default="NEW", nullable=False, index=True)  # NEW, UNACKNOWLEDGED, ACKNOWLEDGED, ASSIGNED, UNDER_INVESTIGATION, ACTION_REQUIRED, RESOLVED, CLOSED
     confidence = Column(Float, nullable=False)

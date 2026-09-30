@@ -25,6 +25,7 @@ try:
     from app.api import api_router
     from app.services.inference_pipeline import pipeline_manager
     from app.services.continuous_health import camera_health_worker
+    from app.services.system_health import collect_system_health
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import engine, SessionLocal
@@ -32,6 +33,7 @@ except ImportError:
     from backend.app.api import api_router
     from backend.app.services.inference_pipeline import pipeline_manager
     from backend.app.services.continuous_health import camera_health_worker
+    from backend.app.services.system_health import collect_system_health
 
 
 DEFAULT_ROLES = [
@@ -133,9 +135,14 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 def root():
-    """Health check root endpoint."""
+    """Return derived status rather than implying health from API availability alone."""
+    system_health = collect_system_health()
     return {
-        "status": "ONLINE",
+        "status": system_health["overall_status"],
+        "api": system_health["api"],
+        "database": system_health["database"],
+        "migrations": system_health["migrations"],
+        "model_status": system_health["model"]["status"],
         "platform": settings.PROJECT_NAME,
         "version": settings.VERSION,
         "docs_url": "/docs"

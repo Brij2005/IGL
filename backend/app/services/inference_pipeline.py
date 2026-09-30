@@ -190,6 +190,7 @@ class InferencePipelineManager:
             settings.MODEL_NAME,
             settings.MODEL_VERSION,
             settings.MODEL_CONFIDENCE_THRESHOLD,
+            settings.MODEL_DEVICE,
         )
         self.tracker = IoUTracker()
         self._inference_lock = threading.Lock()

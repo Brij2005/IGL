@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 data/validation_reports/
+data/evidence/
+data/logs/

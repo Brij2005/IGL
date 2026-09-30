@@ -34,14 +34,17 @@ class Settings(BaseSettings):
     # Phase 4 inference configuration. Empty weights never trigger downloads.
     VIDEO_SOURCE: str | None = None
     RTSP_URL: SecretStr | None = None
+    CAMERA_URL_ENCRYPTION_KEY: SecretStr | None = None
     MODEL_WEIGHTS_PATH: str | None = None
     MODEL_NAME: str | None = None
     MODEL_VERSION: str | None = None
     MODEL_CONFIDENCE_THRESHOLD: float = 0.25
+    MODEL_DEVICE: str = "cpu"
     FRAME_BUFFER_RETENTION_SECONDS: float = 30.0
     FRAME_BUFFER_MAX_FRAMES: int = 100
     FRAME_BUFFER_MAX_BYTES: int = 67_108_864
     CAMERA_HEALTH_INTERVAL_SECONDS: float = Field(default=5.0, gt=0, le=300)
+    EVIDENCE_DIR: str = str(Path(__file__).resolve().parents[2] / "data" / "evidence")
 
     model_config = SettingsConfigDict(
         env_file=".env",

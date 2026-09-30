@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IGL Safety Intelligence</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <script src="js/app.js" defer></script>
+</head>
+<body>
+  <div id="login-screen" class="login-shell">
+    <form id="login-form" class="login-panel">
+      <div class="brand-mark" aria-hidden="true">IGL<span>/</span>SI</div>
+      <p class="eyebrow">INDUSTRIAL SAFETY INTELLIGENCE</p>
+      <h1>Sign in</h1>
+      <label>API base URL
+        <input id="api-base" type="url" value="http://localhost:8000/api/v1" autocomplete="url" required>
+      </label>
+      <label>Username
+        <input id="username" autocomplete="username" required>
+      </label>
+      <label>Password
+        <input id="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit" class="button-primary">Sign in <span aria-hidden="true">-&gt;</span></button>
+      <p id="login-error" class="form-error" role="alert"></p>
+    </form>
+    <p class="login-footnote">IGL-targeted platform · validation status is reported by the connected API</p>
+  </div>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="IGL Safety Intelligence home">
+        <span class="brand-mark" aria-hidden="true">IGL<span>/</span>SI</span>
+        <span class="brand-copy">Safety<br>Intelligence</span>
+      </a>
+      <p class="nav-label">MONITOR</p>
+      <nav id="navigation" aria-label="Primary navigation">
+        <button class="nav-item active" data-view="overview"><span class="nav-symbol">[]</span>Overview</button>
+        <button class="nav-item" data-view="cameras"><span class="nav-symbol">O</span>Cameras</button>
+        <button class="nav-item" data-view="events"><span class="nav-symbol">~</span>Events</button>
+        <button class="nav-item" data-view="evidence"><span class="nav-symbol">#</span>Evidence</button>
+        <button class="nav-item" data-view="analytics"><span class="nav-symbol">%</span>Analytics</button>
+        <button class="nav-item" data-view="system"><span class="nav-symbol">+</span>System health</button>
+        <button class="nav-item" data-view="audit"><span class="nav-symbol">=</span>Audit log</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="igltarget"><span class="status-dot dot-amber"></span><span>IGL VALIDATION<br><strong>NOT VALIDATED</strong></span></div>
+        <button id="logout-button" class="nav-item logout"><span class="nav-symbol">&gt;</span>Sign out</button>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="view-kicker">OPERATIONS / CURRENT STATE</p>
+          <h1 id="view-title">Overview</h1>
+        </div>
+        <div class="topbar-right">
+          <span class="api-state"><span class="status-dot dot-muted" id="api-dot"></span><span id="api-state-text">Checking API</span></span>
+          <span class="user-chip" id="user-chip">Authenticated</span>
+          <button class="icon-button" id="refresh-button" title="Refresh data" aria-label="Refresh data">R</button>
+        </div>
+      </header>
+      <div id="global-message" class="global-message" role="status" hidden></div>
+      <section id="view-content" class="view-content" aria-live="polite"></section>
+      <footer class="page-footer">
+        <span>Decision support only · no plant controls</span>
+        <span id="last-updated">Data not loaded</span>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

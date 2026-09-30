@@ -27,3 +27,13 @@ Set `MODEL_WEIGHTS_PATH` to an existing local model file. `MODEL_NAME`, `MODEL_V
 Set `ENVIRONMENT=production`, provide a unique `SECRET_KEY` with at least 32 characters through environment configuration, and set explicit `BACKEND_CORS_ORIGINS`. Production startup rejects the development key and wildcard CORS. Never commit `.env`, credentials, or camera URLs containing secrets. The `.env.example` key is development-only.
 
 Camera API responses remove RTSP URL user information and redact common credential query parameters. Restrict access to camera configuration because the application still needs the original stream URL to connect.
+
+### Camera URL Encryption
+
+Credential- or query-bearing camera URLs require `CAMERA_URL_ENCRYPTION_KEY`. Generate a Fernet key locally and store it only in a secret manager or `.env`:
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Set the resulting value as `CAMERA_URL_ENCRYPTION_KEY` before creating such cameras. Losing or changing this key makes encrypted camera sources unreadable; perform key rotation with a separately planned, backed-up migration. Existing legacy camera URLs stored before encryption may require a controlled re-encryption procedure; do not assume old rows were encrypted retroactively.

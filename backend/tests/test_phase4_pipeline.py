@@ -55,3 +55,11 @@ def test_inference_health_endpoints_reject_unauthenticated_requests():
     with TestClient(app) as client:
         assert client.get("/api/v1/system/ai-health").status_code in (401, 403)
         assert client.get("/api/v1/system/pipelines").status_code in (401, 403)
+
+
+def test_root_health_does_not_claim_online_when_model_is_unconfigured():
+    with TestClient(app) as client:
+        response = client.get("/")
+    assert response.status_code == 200
+    assert response.json()["status"] == "DEGRADED"
+    assert response.json()["model_status"] == "MODEL_NOT_CONFIGURED"

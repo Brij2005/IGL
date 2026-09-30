@@ -7,9 +7,11 @@ from sqlalchemy.orm import Session
 try:
     from app.models import Camera, CameraHealth, Zone
     from app.schemas_camera import CameraCreate, CameraUpdate
+    from app.utils.encrypted_url import validate_camera_url_storage
 except ImportError:
     from backend.app.models import Camera, CameraHealth, Zone
     from backend.app.schemas_camera import CameraCreate, CameraUpdate
+    from backend.app.utils.encrypted_url import validate_camera_url_storage
 
 
 class CameraManager:
@@ -18,6 +20,7 @@ class CameraManager:
     @staticmethod
     def create_camera(db: Session, camera_in: CameraCreate) -> Camera:
         """Register a new industrial camera and attach initial health record."""
+        validate_camera_url_storage(camera_in.stream_url)
         # Check uniqueness of camera code
         existing = db.query(Camera).filter(Camera.code == camera_in.code).first()
         if existing:
@@ -99,6 +102,8 @@ class CameraManager:
             return None
 
         update_data = camera_in.model_dump(exclude_unset=True)
+        if "stream_url" in update_data:
+            validate_camera_url_storage(update_data["stream_url"])
         for field, value in update_data.items():
             setattr(camera, field, value)
 

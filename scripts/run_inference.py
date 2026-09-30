@@ -96,6 +96,7 @@ def build_model_adapter() -> UltralyticsModelAdapter:
         model_name=settings.MODEL_NAME,
         model_version=settings.MODEL_VERSION,
         confidence_threshold=settings.MODEL_CONFIDENCE_THRESHOLD,
+        device=settings.MODEL_DEVICE,
     )
 
 
@@ -150,6 +151,7 @@ def create_report(
             "version": settings.MODEL_VERSION or model.model_version,
             "weights_identifier": model.weights_path.name if model.weights_path else None,
             "confidence_threshold": model.confidence_threshold,
+            "device": model.device,
             "load_status": model.health()["status"],
             "class_names": model.health()["classes"],
         },
