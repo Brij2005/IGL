@@ -17,8 +17,11 @@ class EventOut(BaseModel):
     observation_state: str
     severity: str
     workflow_state: str
-    confidence: float
-    duration_seconds: float
+    # Absent when the observation is NOT_ASSESSABLE, for example a camera
+    # failure. There is no measured value to report in that case, so the field
+    # stays null rather than carrying a fabricated number.
+    confidence: float | None
+    duration_seconds: float | None
     started_at: datetime
     ended_at: datetime | None
     model_version: str | None

@@ -29,23 +29,25 @@ Status vocabulary used throughout this repository:
 │   ├── requirements.txt         # Pinned dependencies
 │   ├── migrations/
 │   │   ├── env.py               # IMPLEMENTED  Loads ORM metadata for autogenerate
-│   │   └── versions/            # IMPLEMENTED  7 deterministic revisions
+│   │   └── versions/            # IMPLEMENTED  8 deterministic revisions
 │   │       ├── e822fa83c9db_001_initial_schema_22_tables.py
 │   │       ├── c14a2b9f6d31_002_observed_camera_health.py
 │   │       ├── d71e3f0a2c44_003_nullable_unmeasured_image_quality.py
 │   │       ├── a08d5e9c1f72_004_event_state_transitions.py
 │   │       ├── f2c8a6d104be_005_widen_encrypted_camera_url.py
 │   │       ├── b63a2f1d7c09_006_ppe_rule_provenance.py
-│   │       └── 9c4b2e7a1d55_007_nullable_unmeasured_camera_telemetry.py
+│   │       ├── 9c4b2e7a1d55_007_nullable_unmeasured_camera_telemetry.py
+│   │       └── 4e8f1b3c7a92_008_safety_response_lifecycles.py
 │   ├── app/
 │   │   ├── main.py              # IMPLEMENTED  App, lifespan, request-ID middleware
 │   │   ├── config.py            # IMPLEMENTED  Settings, production guards
 │   │   ├── database.py          # IMPLEMENTED  Engine/session; schema is migration-owned
-│   │   ├── models.py            # IMPLEMENTED  23 domain tables
+│   │   ├── models.py            # IMPLEMENTED  26 domain tables
 │   │   ├── auth.py              # IMPLEMENTED  bcrypt, JWT, RBAC, login throttle
 │   │   ├── schemas.py           # IMPLEMENTED  Auth/user/audit request+response models
 │   │   ├── schemas_camera.py    # IMPLEMENTED  Camera models; stream URL sanitized
 │   │   ├── schemas_events.py    # IMPLEMENTED  Event read/transition models
+│   │   ├── schemas_response.py  # IMPLEMENTED  Incident/near-miss/action models
 │   │   ├── schemas_configuration.py  # IMPLEMENTED  Plant/area/zone/PPE models
 │   │   ├── schemas_system.py    # IMPLEMENTED  Response models for system endpoints
 │   │   ├── api/
@@ -53,6 +55,7 @@ Status vocabulary used throughout this repository:
 │   │   │   ├── auth.py          # IMPLEMENTED  Login, users, roles, audit logs
 │   │   │   ├── cameras.py       # IMPLEMENTED  Camera CRUD + health
 │   │   │   ├── events.py        # IMPLEMENTED  Event list + workflow transitions
+│   │   │   ├── responses.py     # IMPLEMENTED  Acknowledgement, assignment, response lifecycles
 │   │   │   ├── evidence.py      # IMPLEMENTED  Event-linked evidence retrieval
 │   │   │   ├── analytics.py     # IMPLEMENTED  Database count summary
 │   │   │   ├── notifications.py # IMPLEMENTED  In-app queue
@@ -69,6 +72,7 @@ Status vocabulary used throughout this repository:
 │   │   │   ├── evidence_engine.py      # PARTIAL  Snapshot capture from buffered frames
 │   │   │   ├── notification_engine.py  # PARTIAL  Queue only; external senders absent
 │   │   │   ├── workflow_engine.py      # IMPLEMENTED  Validated state transitions
+│   │   │   ├── response_engine.py      # IMPLEMENTED  Incident/near-miss/action lifecycles
 │   │   │   ├── zone_engine.py          # PARTIAL  Geometry primitives; no IGL polygons
 │   │   │   └── ppe_rules.py            # PARTIAL  Rule interpretation primitive
 │   │   ├── engine/
@@ -92,6 +96,7 @@ Status vocabulary used throughout this repository:
 │       ├── test_notifications_analytics.py
 │       ├── test_phase4_core.py
 │       ├── test_phase4_pipeline.py
+│       ├── test_response_lifecycle.py
 │       ├── test_safety_primitives.py
 │       ├── test_security.py
 │       ├── test_startup.py
@@ -128,10 +133,11 @@ The following modules are referenced by no import in this repository and are
 listed here so they are not mistaken for missing work: safety event generation,
 PPE detection, proximity, fall, fire/smoke, and leakage detection; face
 recognition or identity resolution; WebSocket or live-video streaming; external
-notification senders (email, webhook); an import workflow for `config/igl/`;
-incident, near-miss, acknowledgement, assignment, and corrective-action write
-APIs (their tables exist and are read by analytics, but no write endpoint
-exists).
+notification senders (email, webhook); an import workflow for `config/igl/`; and
+automated safety decisions. The response endpoints in `api/responses.py` raise
+incidents, near-misses, and corrective actions from already-persisted events on
+an authenticated operator's request. Nothing in this repository creates an
+`Event` from a detection, because no safety detector is connected.
 
 ## Explicitly Absent Data
 

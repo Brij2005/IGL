@@ -15,6 +15,21 @@ identifier is generated.
 - `GET/POST /configuration/plants`, `/configuration/areas`, `/configuration/zones`, and `/configuration/ppe-rules` provide authenticated operator-supplied configuration. Writes are audited. Configured PPE thresholds require a source reference and remain `NOT_VALIDATED`.
 - `GET /analytics/summary` returns counts from database records and `NOT_MEASURED` accuracy state.
 - `GET /system/health`, `GET /system/ai-health`, and `GET /system/pipelines` expose actual subsystem, model, and pipeline state.
+- `GET/POST /events/{event_id}/acknowledgements` records an operator acknowledgement and advances the event in one transaction. Repeating it returns `409`.
+- `GET/POST /events/{event_id}/assignments` assigns an acknowledged event to an active user. Assigning an inactive user, or an event that is not `ACKNOWLEDGED`, returns `409`.
+- `GET/POST /incidents`, `GET /incidents/{incident_id}`, and `POST /incidents/{incident_id}/transitions` manage the incident lifecycle; `GET /incidents/{incident_id}/transitions` returns its history.
+- `GET/POST /near-misses` and `POST /near-misses/{near_miss_id}/transitions` manage the near-miss lifecycle; `GET /near-misses/{near_miss_id}/transitions` returns its history.
+- `GET/POST /corrective-actions` and `POST /corrective-actions/{action_id}/transitions` manage corrective actions; `GET /corrective-actions/{action_id}/transitions` returns its history. A corrective action must name exactly one existing parent (`event_id`, `incident_id`, or `near_miss_id`).
+- `GET /lifecycle-states` publishes the declared state machine for every response entity, so a client never has to infer allowed states.
+
+Response writes require `ADMIN` or `SAFETY_OFFICER`. Every transition requires a
+reason, is validated against the declared state map, and is recorded with its
+actor and previous state. An illegal transition returns `409` and changes
+nothing.
+
+No response endpoint creates an `Event`. Incidents, near-misses, and corrective
+actions are raised by an authenticated operator against an event that already
+exists, because no safety detector is connected to this platform.
 
 `GET /` is a derived health summary, not evidence of real input or AI
 validation. It reports `APPLICATION_UP` separately from `DATABASE_OK` /
@@ -36,6 +51,4 @@ validation. It reports `APPLICATION_UP` separately from `DATABASE_OK` /
 There is no event-generation API, PPE/zone/proximity/fall/fire/smoke detector
 API, WebSocket, live video stream, or user-administration UI. The system does
 not create an event from a detection automatically. Empty analytics reflect DB
-counts only. The `incidents`, `near_misses`, `acknowledgements`, `assignments`,
-and `corrective_actions` tables exist and are counted by analytics, but no
-write endpoint exists for them.
+counts only.

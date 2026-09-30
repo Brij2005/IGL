@@ -23,7 +23,17 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import app.models  # noqa: E402,F401
 from app.database import Base, init_db  # noqa: E402
 
-DOMAIN_TABLE_COUNT = 23
+DOMAIN_TABLES = {
+    "plants", "areas", "zones", "cameras", "camera_health", "roles", "users",
+    "ppe_rules", "equipments", "tracks", "detections", "events", "event_evidence",
+    "event_state_transitions", "incidents", "near_misses", "acknowledgements",
+    "assignments", "corrective_actions", "notifications", "audit_logs",
+    "model_versions", "model_metrics",
+    "incident_state_transitions", "near_miss_state_transitions",
+    "corrective_action_state_transitions",
+}
+BASE_REVISION = "e822fa83c9db"
+DOMAIN_TABLE_COUNT = len(DOMAIN_TABLES)
 
 
 def run_alembic(database_file: Path, *arguments: str) -> subprocess.CompletedProcess:
@@ -93,15 +103,12 @@ def test_alembic_env_exposes_populated_target_metadata():
 def test_fresh_database_upgrade_creates_every_domain_table(tmp_path):
     database_file = tmp_path / "fresh.sqlite"
     run_alembic(database_file, "upgrade", "head")
-    tables = domain_tables(database_file)
-    assert len(tables) == DOMAIN_TABLE_COUNT
-    assert {
-        "plants", "areas", "zones", "cameras", "camera_health", "roles", "users",
-        "ppe_rules", "equipments", "tracks", "detections", "events", "event_evidence",
-        "event_state_transitions", "incidents", "near_misses", "acknowledgements",
-        "assignments", "corrective_actions", "notifications", "audit_logs",
-        "model_versions", "model_metrics",
-    } == tables
+    assert domain_tables(database_file) == DOMAIN_TABLES
+
+
+def test_orm_metadata_declares_exactly_the_domain_tables():
+    """The ORM models and the migration chain must describe the same table set."""
+    assert set(Base.metadata.tables) == DOMAIN_TABLES
 
 
 def test_migrated_schema_matches_orm_metadata(tmp_path):
@@ -181,8 +188,15 @@ def test_stepwise_upgrade_matches_upgrade_head(tmp_path):
     config = Config(str(PROJECT_ROOT / "backend" / "alembic.ini"))
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     ordered_revisions = list(reversed(list(ScriptDirectory.from_config(config).walk_revisions())))
-    assert len(ordered_revisions) == 7
+    # The chain must stay a single linear path from the original baseline, so a
+    # lost or branching revision cannot quietly pass unnoticed.
+    assert len({revision.revision for revision in ordered_revisions}) == len(ordered_revisions)
+    assert ordered_revisions[0].revision == BASE_REVISION
+    assert ScriptDirectory.from_config(config).get_heads() == [ordered_revisions[-1].revision]
+    for previous, current in zip(ordered_revisions, ordered_revisions[1:]):
+        assert current.down_revision == previous.revision
 
     for revision in ordered_revisions:
         run_alembic(stepwise, "upgrade", revision.revision)
     assert domain_tables(direct) == domain_tables(stepwise)
+    assert domain_tables(stepwise) == DOMAIN_TABLES

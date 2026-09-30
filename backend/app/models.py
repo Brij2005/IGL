@@ -302,8 +302,8 @@ class Event(Base):
     observation_state = Column(String(50), default="NOT_VALIDATED", nullable=False)  # CONFIRMED, POSSIBLE, NOT_ASSESSABLE, NOT_VALIDATED
     severity = Column(String(20), default="MEDIUM", nullable=False, index=True)  # LOW, MEDIUM, HIGH, CRITICAL
     workflow_state = Column(String(50), default="NEW", nullable=False, index=True)  # NEW, UNACKNOWLEDGED, ACKNOWLEDGED, ASSIGNED, UNDER_INVESTIGATION, ACTION_REQUIRED, RESOLVED, CLOSED
-    confidence = Column(Float, nullable=False)
-    duration_seconds = Column(Float, default=0.0, nullable=False)
+    confidence = Column(Float, nullable=True)  # NULL when observation_state is NOT_ASSESSABLE
+    duration_seconds = Column(Float, nullable=True)  # NULL until a real duration is measured
     started_at = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     model_version = Column(String(50), nullable=True)
@@ -357,6 +357,54 @@ class EventStateTransition(Base):
     user = relationship("User")
 
 
+class IncidentStateTransition(Base):
+    """Auditable record of an allowed incident workflow transition."""
+    __tablename__ = "incident_state_transitions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    incident_id = Column(String(36), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    previous_state = Column(String(50), nullable=False)
+    new_state = Column(String(50), nullable=False)
+    reason = Column(Text(), nullable=False)
+    transitioned_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    incident = relationship("Incident", back_populates="state_transitions")
+    user = relationship("User")
+
+
+class NearMissStateTransition(Base):
+    """Auditable record of an allowed near-miss workflow transition."""
+    __tablename__ = "near_miss_state_transitions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    near_miss_id = Column(String(36), ForeignKey("near_misses.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    previous_state = Column(String(50), nullable=False)
+    new_state = Column(String(50), nullable=False)
+    reason = Column(Text(), nullable=False)
+    transitioned_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    near_miss = relationship("NearMiss", back_populates="state_transitions")
+    user = relationship("User")
+
+
+class CorrectiveActionStateTransition(Base):
+    """Auditable record of an allowed corrective-action workflow transition."""
+    __tablename__ = "corrective_action_state_transitions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    corrective_action_id = Column(String(36), ForeignKey("corrective_actions.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    previous_state = Column(String(50), nullable=False)
+    new_state = Column(String(50), nullable=False)
+    reason = Column(Text(), nullable=False)
+    transitioned_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    corrective_action = relationship("CorrectiveAction", back_populates="state_transitions")
+    user = relationship("User")
+
+
 # ============================================================================
 # 5. WORKFLOW, INCIDENT & RESPONSE DOMAIN MODELS
 # ============================================================================
@@ -379,6 +427,7 @@ class Incident(Base):
     event = relationship("Event", back_populates="incidents")
     reporter = relationship("User", back_populates="reported_incidents")
     corrective_actions = relationship("CorrectiveAction", back_populates="incident")
+    state_transitions = relationship("IncidentStateTransition", back_populates="incident", cascade="all, delete-orphan")
 
 
 class NearMiss(Base):
@@ -391,11 +440,15 @@ class NearMiss(Base):
     description = Column(Text, nullable=True)
     potential_severity = Column(String(20), default="HIGH", nullable=False)
     interaction_type = Column(String(100), nullable=True)  # e.g., PERSON_VEHICLE_PROXIMITY
+    status = Column(String(50), default="REPORTED", nullable=False, index=True)  # REPORTED, UNDER_REVIEW, CONFIRMED, DISMISSED, CLOSED
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     event = relationship("Event", back_populates="near_misses")
     corrective_actions = relationship("CorrectiveAction", back_populates="near_miss")
+    state_transitions = relationship("NearMissStateTransition", back_populates="near_miss", cascade="all, delete-orphan")
 
 
 class Acknowledgement(Base):
@@ -451,6 +504,7 @@ class CorrectiveAction(Base):
     incident = relationship("Incident", back_populates="corrective_actions")
     near_miss = relationship("NearMiss", back_populates="corrective_actions")
     assignee = relationship("User", back_populates="corrective_actions")
+    state_transitions = relationship("CorrectiveActionStateTransition", back_populates="corrective_action", cascade="all, delete-orphan")
 
 
 class Notification(Base):

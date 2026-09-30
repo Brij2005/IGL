@@ -281,9 +281,10 @@ def test_alembic_upgrade_downgrade_upgrade_uses_temporary_database(tmp_path):
         return tables - {"alembic_version"}
 
     run_alembic("upgrade", "head")
-    assert len(domain_tables()) == 23
-    assert "event_state_transitions" in domain_tables()
+    upgraded_tables = domain_tables()
+    assert "event_state_transitions" in upgraded_tables
+    assert {"incident_state_transitions", "near_miss_state_transitions", "corrective_action_state_transitions"} <= upgraded_tables
     run_alembic("downgrade", "base")
     assert domain_tables() == set()
     run_alembic("upgrade", "head")
-    assert len(domain_tables()) == 23
+    assert domain_tables() == upgraded_tables
