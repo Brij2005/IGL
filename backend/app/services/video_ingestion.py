@@ -52,10 +52,16 @@ class StreamReader:
         self.current_fps: float = 0.0
         self.total_frames_read: int = 0
         self.dropped_frames_count: int = 0
+        self.first_frame_timestamp: Optional[datetime] = None
         self.last_frame_timestamp: Optional[datetime] = None
         self.is_connected: bool = False
         self.last_error: Optional[str] = None
         self.status = "STOPPED"
+        self.source_resolution: tuple[int, int] | None = None
+        self.source_fps: float | None = None
+        self.source_duration_seconds: float | None = None
+        self.reconnects = 0
+        self._has_connected = False
         self._stop_event = threading.Event()
 
     def start(self):
@@ -93,7 +99,18 @@ class StreamReader:
                 logger.warning("Video file unavailable", extra={"component": "video_ingestion", "camera_id": self.camera_id})
                 self._running = False
                 break
-            cap = cv2.VideoCapture(self.stream_url)
+            try:
+                cap = cv2.VideoCapture(self.stream_url)
+            except Exception as exc:
+                self.last_error = type(exc).__name__
+                self.status = "SOURCE_UNAVAILABLE" if is_file_source else "DISCONNECTED"
+                logger.error("Video source open failed", extra={"component": "video_ingestion", "camera_id": self.camera_id, "error_type": type(exc).__name__})
+                if is_file_source:
+                    self._running = False
+                    break
+                self._stop_event.wait(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+                continue
             if not cap.isOpened():
                 self.is_connected = False
                 self.last_error = "Failed to open configured video source"
@@ -107,6 +124,20 @@ class StreamReader:
                 continue
 
             self.is_connected = True
+            if self._has_connected:
+                self.reconnects += 1
+            self._has_connected = True
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            if width > 0 and height > 0:
+                self.source_resolution = (width, height)
+            reported_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            if np.isfinite(reported_fps) and reported_fps > 0:
+                self.source_fps = reported_fps
+                if is_file_source:
+                    frame_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+                    if frame_count > 0:
+                        self.source_duration_seconds = frame_count / reported_fps
             self.last_error = None
             self.status = "RUNNING"
             reconnect_delay = 1.0  # Reset reconnect delay on success
@@ -115,13 +146,19 @@ class StreamReader:
             start_time = time.time()
 
             while self._running and cap.isOpened():
-                ret, frame = cap.read()
-                if not ret or frame is None:
+                try:
+                    ret, frame = cap.read()
+                except Exception as exc:
                     self.dropped_frames_count += 1
+                    self.last_error = type(exc).__name__
+                    logger.error("Video frame read failed", extra={"component": "video_ingestion", "camera_id": self.camera_id, "error_type": type(exc).__name__})
+                    break
+                if not ret or frame is None:
                     if is_file_source:
                         self.status = "END_OF_FILE"
                         self._running = False
                         break
+                    self.dropped_frames_count += 1
                     self.last_error = "Frame read failed"
                     break
 
@@ -134,6 +171,8 @@ class StreamReader:
                 now = datetime.now(timezone.utc)
                 frame_count += 1
                 self.total_frames_read += 1
+                if self.first_frame_timestamp is None:
+                    self.first_frame_timestamp = now
                 self.last_frame_timestamp = now
 
                 # Calculate live FPS
@@ -150,7 +189,10 @@ class StreamReader:
                     self.last_error = type(exc).__name__
                     logger.error("Frame buffer rejected a frame", extra={"component": "video_ingestion", "camera_id": self.camera_id, "error_type": type(exc).__name__})
 
-            cap.release()
+            try:
+                cap.release()
+            except Exception as exc:
+                logger.error("Video source release failed", extra={"component": "video_ingestion", "camera_id": self.camera_id, "error_type": type(exc).__name__})
             self.is_connected = False
             if self._running and not is_file_source:
                 self._stop_event.wait(reconnect_delay)

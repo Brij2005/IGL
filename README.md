@@ -27,3 +27,14 @@ The default development database is `data/database.db`. Never delete or recreate
 After authentication, inspect `GET /api/v1/system/ai-health` and `GET /api/v1/system/pipelines`. An offline source, unavailable model, or inference error is reported as a non-running/unavailable state; it is not treated as safe monitoring. Camera responses redact URL user information and credential-like query values.
 
 The platform is an advisory layer. It does not control PLCs, machinery, valves, interlocks, or emergency systems. See [docs/architecture.md](docs/architecture.md) and [docs/ai_validation.md](docs/ai_validation.md).
+
+## Run Real-Input Validation
+
+Provide one authorized source (`VIDEO_SOURCE` for a local video or `RTSP_URL` for an IP stream) and a readable local `.pt` checkpoint with explicit `MODEL_NAME` and `MODEL_VERSION` in `.env`. Set `MODEL_CONFIDENCE_THRESHOLD` for that model. Alternatively, pass a local file or credential-free URL with `--source`.
+
+```powershell
+python scripts/run_inference.py --source "C:\authorized\path\sample.mp4"
+python scripts/run_inference.py --duration-seconds 30
+```
+
+The second command reads `RTSP_URL` from the environment without echoing it. A JSON report is written under `data/validation_reports/`, which is git-ignored. No model weights are downloaded. Missing or invalid inputs fail with explicit status codes. See [docs/validation.md](docs/validation.md) for setup, metrics, and evidence requirements.

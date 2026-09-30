@@ -30,6 +30,8 @@ class UltralyticsModelAdapter:
         self.confidence_threshold = confidence_threshold
         self.classes: tuple[str, ...] = ()
         self.inference_latency_ms: float | None = None
+        self.inference_count = 0
+        self._latency_total_ms = 0.0
         self.status = "MODEL_NOT_CONFIGURED" if self.weights_path is None else "NOT_LOADED"
         self._model: Any = None
 
@@ -37,7 +39,18 @@ class UltralyticsModelAdapter:
         if self.weights_path is None:
             self.status = "MODEL_NOT_CONFIGURED"
             return False
-        if self.weights_path.suffix.lower() != ".pt" or not self.weights_path.is_file() or self.weights_path.stat().st_size == 0:
+        if self.weights_path.suffix.lower() != ".pt" or not self.weights_path.is_file():
+            self.status = "MODEL_INVALID_WEIGHTS"
+            return False
+        try:
+            if self.weights_path.stat().st_size == 0:
+                self.status = "MODEL_INVALID_WEIGHTS"
+                return False
+            with self.weights_path.open("rb") as weights_file:
+                if not weights_file.read(1):
+                    self.status = "MODEL_INVALID_WEIGHTS"
+                    return False
+        except OSError:
             self.status = "MODEL_INVALID_WEIGHTS"
             return False
         if self.model_version == "UNSPECIFIED":
@@ -92,6 +105,8 @@ class UltralyticsModelAdapter:
             raise RuntimeError("Model inference failed") from exc
         finally:
             self.inference_latency_ms = round((time.perf_counter() - started) * 1000, 3)
+            self._latency_total_ms += self.inference_latency_ms
+            self.inference_count += 1
 
     def health(self) -> dict[str, Any]:
         return {
@@ -102,6 +117,8 @@ class UltralyticsModelAdapter:
             "classes": list(self.classes),
             "confidence_threshold": self.confidence_threshold,
             "inference_latency_ms": self.inference_latency_ms,
+            "average_inference_latency_ms": round(self._latency_total_ms / self.inference_count, 3) if self.inference_count else None,
+            "inference_count": self.inference_count,
         }
 
     def metadata(self) -> dict[str, Any]:

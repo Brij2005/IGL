@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:5500"]
 
     # Phase 4 inference configuration. Empty weights never trigger downloads.
+    VIDEO_SOURCE: str | None = None
+    RTSP_URL: SecretStr | None = None
     MODEL_WEIGHTS_PATH: str | None = None
     MODEL_NAME: str | None = None
     MODEL_VERSION: str | None = None

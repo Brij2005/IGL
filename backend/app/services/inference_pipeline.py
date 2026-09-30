@@ -50,8 +50,11 @@ class CameraInferencePipeline:
         self._last_frame_timestamp: datetime | None = None
         self._last_error_type: str | None = None
         self._frames_seen = 0
+        self._inferences_attempted = 0
         self._inferences_completed = 0
         self._inference_failures = 0
+        self._tracking_failures = 0
+        self._detection_count = 0
         self._last_inference_timestamp: datetime | None = None
         self._state = "STOPPED"
         self._lock = threading.RLock()
@@ -89,22 +92,38 @@ class CameraInferencePipeline:
                 self._state = self.model.health()["status"]
             return []
         try:
+            self._inferences_attempted += 1
             with self.inference_lock:
                 detections = self.model.predict(self.camera_id, timestamp, frame)
-            self.tracker.update(self.camera_id, detections, timestamp)
-            self._inferences_completed += 1
-            self._last_inference_timestamp = timestamp
-            with self._lock:
-                self._state = "RUNNING"
-                self._last_error_type = None
-            return detections
         except Exception as exc:
-            self._record_failure(type(exc).__name__)
+            self._inference_failures += 1
+            self._last_error_type = type(exc).__name__
+            with self._lock:
+                self._state = "INFERENCE_ERROR"
             logger.error(
-                "Frame inference pipeline failed",
+                "Frame inference failed",
                 extra={"component": "inference_pipeline", "camera_id": self.camera_id, "error_type": type(exc).__name__},
             )
             return []
+        self._inferences_completed += 1
+        self._last_inference_timestamp = timestamp
+        self._detection_count += len(detections)
+        try:
+            self.tracker.update(self.camera_id, detections, timestamp)
+        except Exception as exc:
+            self._tracking_failures += 1
+            self._last_error_type = type(exc).__name__
+            with self._lock:
+                self._state = "TRACKING_ERROR"
+            logger.error(
+                "Frame tracking failed",
+                extra={"component": "inference_pipeline", "camera_id": self.camera_id, "error_type": type(exc).__name__},
+            )
+            return detections
+        with self._lock:
+            self._state = "RUNNING"
+            self._last_error_type = None
+        return detections
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -120,8 +139,11 @@ class CameraInferencePipeline:
                 "inference_status": inference_status,
                 "stream_status": self.reader.status if self.reader else "NOT_STARTED",
                 "frames_seen": self._frames_seen,
+                "inferences_attempted": self._inferences_attempted,
                 "inferences_completed": self._inferences_completed,
                 "inference_failures": self._inference_failures,
+                "tracking_failures": self._tracking_failures,
+                "detection_count": self._detection_count,
                 "last_frame_timestamp": self._last_frame_timestamp,
                 "last_inference_timestamp": self._last_inference_timestamp,
                 "last_error_type": self._last_error_type,
@@ -146,7 +168,8 @@ class CameraInferencePipeline:
                 self._last_frame_timestamp = buffered.timestamp
                 self.process_frame(buffered.timestamp, buffered.image, already_buffered=True)
             if not reader._running and reader.status in ("SOURCE_UNAVAILABLE", "END_OF_FILE", "STOPPED"):
-                break
+                if not reader.get_frames_after(self._last_frame_timestamp):
+                    break
         self._running = False
         with self._lock:
             if self._state in ("STARTING", "MODEL_NOT_CONFIGURED", "MODEL_INVALID_WEIGHTS", "NOT_LOADED"):

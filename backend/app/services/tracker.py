@@ -39,6 +39,7 @@ class IoUTracker:
         self.max_lost_seconds = max_lost_seconds
         self.max_history = max_history
         self._tracks: dict[str, VisualTrack] = {}
+        self._lifecycle_transitions = {state: 0 for state in ("DETECTED", "TRACKED", "TEMPORARILY_LOST", "ENDED")}
         self._lock = RLock()
 
     def update(self, camera_id: str, detections: list[Detection], timestamp: datetime) -> tuple[VisualTrack, ...]:
@@ -50,7 +51,7 @@ class IoUTracker:
             ]
             for track in candidates:
                 if (now - track.last_seen).total_seconds() > self.max_lost_seconds:
-                    track.lifecycle_state = "ENDED"
+                    self._transition(track, "ENDED")
 
             available_tracks = [track for track in candidates if track.lifecycle_state != "ENDED"]
             pairs = sorted(
@@ -74,7 +75,7 @@ class IoUTracker:
 
             for track in available_tracks:
                 if track.track_id not in matched_tracks:
-                    track.lifecycle_state = "TEMPORARILY_LOST"
+                    self._transition(track, "TEMPORARILY_LOST")
 
             for index, detection in enumerate(detections):
                 if index in matched_detections or detection.camera_id != camera_id:
@@ -88,6 +89,7 @@ class IoUTracker:
                     last_seen=now,
                     bbox=detection.bbox,
                     confidence=detection.confidence,
+                    lifecycle_state="NEW",
                 )
                 self._observe(track, detection, now, "DETECTED")
                 self._tracks[track_id] = track
@@ -101,11 +103,23 @@ class IoUTracker:
                 if camera_id is None or track.camera_id == camera_id
             )
 
+    def metrics(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "unique_track_count": len(self._tracks),
+                "lifecycle_transitions": dict(self._lifecycle_transitions),
+            }
+
+    def _transition(self, track: VisualTrack, state: TrackState) -> None:
+        if track.lifecycle_state != state:
+            self._lifecycle_transitions[state] += 1
+            track.lifecycle_state = state
+
     def _observe(self, track: VisualTrack, detection: Detection, now: datetime, state: TrackState) -> None:
         track.last_seen = now
         track.bbox = detection.bbox
         track.confidence = detection.confidence
-        track.lifecycle_state = state
+        self._transition(track, state)
         track.trajectory.append(TrackPoint(now, detection.bbox))
         if len(track.trajectory) > self.max_history:
             del track.trajectory[:-self.max_history]
