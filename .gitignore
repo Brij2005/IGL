@@ -8,11 +8,14 @@ __pycache__/
 data/validation_reports/
 data/evidence/
 data/logs/
-data/*.db
-data/*.db-wal
-data/*.db-shm
+*.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
+*.log
+*.log.*
+.codex-tmp/
 
 # Model artifacts are operator-supplied and are not distributed by default.
 *.pt

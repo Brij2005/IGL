@@ -157,10 +157,12 @@ def build_webcam_url(
 
 
 def _candidate_backends() -> list[tuple[int, str]]:
-    """Backends to try, most reliable first on Windows."""
+    """Try Windows-native backends before OpenCV's automatic selection."""
     backends: list[tuple[int, str]] = []
     if hasattr(cv2, "CAP_DSHOW"):
         backends.append((cv2.CAP_DSHOW, "DSHOW"))
+    if hasattr(cv2, "CAP_MSMF"):
+        backends.append((cv2.CAP_MSMF, "MSMF"))
     backends.append((cv2.CAP_ANY, "ANY"))
     return backends
 

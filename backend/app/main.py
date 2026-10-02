@@ -186,7 +186,7 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """Attach a correlation ID to every request and response."""
+    """Attach correlation and baseline browser security headers to responses."""
     candidate = request.headers.get(REQUEST_ID_HEADER, "")
     request_id = (
         candidate
@@ -198,6 +198,15 @@ async def request_id_middleware(request: Request, call_next):
     request.state.request_id = request_id
     response: Response = await call_next(request)
     response.headers[REQUEST_ID_HEADER] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = "base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if request.url.path.startswith(f"{settings.API_V1_STR}/auth/"):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 

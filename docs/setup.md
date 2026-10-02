@@ -54,7 +54,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 For first startup, set `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_FULL_NAME`, and `INITIAL_ADMIN_PASSWORD` in a protected environment/secret manager. The password must be 12–72 UTF-8 bytes. The API creates this account only if the database has no ADMIN; remove the bootstrap password after provisioning. Login is available at `/api/v1/auth/login`; the frontend presents a sign-in screen automatically when the backend reports authenticated mode. Users can change their password at `/api/v1/auth/password`.
 
-JWT authentication and role/permission checks are implemented, but this repository does not bundle a production secret manager, TLS/reverse proxy, distributed rate limiter, recovery/MFA, certified database topology, or independent security review. Wildcard CORS is rejected; use exact origins. Keep any deployment behind reviewed TLS and network controls.
+JWT authentication and role/permission checks are implemented. Production/staging reject SQLite URLs and wildcard CORS, but this repository does not bundle a production database driver/topology, secret manager, TLS/reverse proxy, distributed rate limiter, recovery/MFA, or independent security review. Use an installed SQLAlchemy driver, exact frontend origins, and reviewed TLS/network controls.
 
 Run the static dashboard from a second project-root terminal with `python -m http.server 8001 --directory frontend`; open `http://127.0.0.1:8001`.
 

@@ -1,12 +1,10 @@
 """Security regression tests.
 
-Authentication was deliberately removed from this build, so these tests do not
-cover login, throttling, password hashing or token validation. They cover what
-the security surface actually is now: credential redaction in displayed and
-serialised output, encryption requirements for credential-bearing camera URLs,
-audit records that never contain camera source values, request-ID sanitisation,
-pagination bounds, response-model hygiene, the anonymous-access mode and its
-refusal when disabled, and repository secret hygiene.
+These tests cover credential redaction, authentication and role enforcement,
+encryption requirements for credential-bearing camera URLs, audit records that
+never contain camera source values, response headers and request-ID
+sanitisation, pagination bounds, response-model hygiene, anonymous-access
+configuration, and repository secret hygiene.
 
 Every credential used here is a test fixture created inside the test; no real
 secret, camera, or production database is involved.
@@ -158,7 +156,12 @@ def test_camera_response_schema_strips_credentials():
 
 def test_shared_deployment_requires_a_signing_secret():
     with pytest.raises(ValueError, match="AUTH_JWT_SECRET_KEY"):
-        Settings(ENVIRONMENT="production", ALLOW_ANONYMOUS_ACCESS=False, _env_file=None)
+        Settings(
+            ENVIRONMENT="production",
+            ALLOW_ANONYMOUS_ACCESS=False,
+            DATABASE_URL="postgresql://operator:secret@database.example/igl",
+            _env_file=None,
+        )
 
 
 def test_wildcard_cors_is_rejected_in_every_environment():
@@ -177,14 +180,34 @@ def test_non_local_environment_can_fail_closed_when_anonymous_access_is_disabled
         ENVIRONMENT="production",
         ALLOW_ANONYMOUS_ACCESS=False,
         AUTH_JWT_SECRET_KEY=SecretStr("x" * 32),
+        DATABASE_URL="postgresql://operator:secret@database.example/igl",
         _env_file=None,
     )
     assert configured.authentication_state() == "ANONYMOUS_ACCESS_DISABLED_AUTHENTICATION_REQUIRED"
 
 
+@pytest.mark.parametrize("environment", ["production", "staging"])
+def test_non_local_environment_rejects_sqlite_database(environment):
+    with pytest.raises(ValueError, match="SQLite is local-development only"):
+        Settings(
+            ENVIRONMENT=environment,
+            ALLOW_ANONYMOUS_ACCESS=False,
+            AUTH_JWT_SECRET_KEY=SecretStr("x" * 32),
+            _env_file=None,
+        )
+
+
 def test_secret_typed_settings_do_not_leak_in_repr():
-    configured = Settings(RTSP_URL=SecretStr("rtsp://user:secret@camera.invalid/live"))
-    assert "secret" not in repr(configured)
+    configured = Settings(
+        RTSP_URL=SecretStr("rtsp://user:camera-secret@camera.invalid/live"),
+        DATABASE_URL="postgresql://operator:database-secret@database.invalid/igl",
+        SMTP_USERNAME="operator",
+        SMTP_PASSWORD=SecretStr("smtp-secret"),
+        WHATSAPP_ACCESS_TOKEN=SecretStr("whatsapp-secret"),
+    )
+    representation = repr(configured)
+    for secret in ("camera-secret", "database-secret", "smtp-secret", "whatsapp-secret"):
+        assert secret not in representation
 
 
 def test_access_model_is_reported_explicitly():
@@ -422,6 +445,20 @@ def test_unsafe_request_id_is_replaced(secured_client):
     assert response.headers["X-Request-ID"]
 
 
+def test_baseline_security_headers_and_auth_cache_policy(secured_client):
+    client, _session = secured_client
+    response = client.get("/")
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert response.headers["Permissions-Policy"] == "camera=(self), microphone=(), geolocation=()"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    assert "Strict-Transport-Security" not in response.headers
+
+    login = client.post("/api/v1/auth/login", json={})
+    assert login.headers["Cache-Control"] == "no-store"
+
+
 # ---------------------------------------------------------------------------
 # Camera configuration auditing
 # ---------------------------------------------------------------------------
@@ -515,5 +552,11 @@ def test_git_ignores_secrets_and_caches():
     ignore = (Path(__file__).resolve().parents[2] / ".gitignore").read_text(encoding="utf-8")
     assert ".env" in ignore
     assert "__pycache__/" in ignore
-    assert "data/*.db" in ignore
+    assert "*.db" in ignore
+    assert "*.sqlite3" in ignore
+    assert "*.log" in ignore
+    assert "data/evidence/" in ignore
+    assert "*.pt" in ignore
+    assert "*.onnx" in ignore
+    assert "*.engine" in ignore
     assert os.path.exists(Path(__file__).resolve().parents[2] / ".env.example")

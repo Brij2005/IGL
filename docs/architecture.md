@@ -26,7 +26,7 @@ Health output reports observation, never assumption. The application process bei
 up is reported as `APPLICATION_UP` and is separate from `DATABASE_OK` /
 `DATABASE_UNAVAILABLE`, `MIGRATIONS_CURRENT` /
 `MIGRATIONS_PENDING_OR_UNAVAILABLE`, `MODEL_CONFIGURED` /
-`MODEL_NOT_CONFIGURED`, and `NO_CAMERA` / `CAMERA_AVAILABLE` /
+`MODEL_NOT_CONFIGURED`, and `NO_CAMERA` / `CAMERA_CONFIGURED_NOT_OBSERVED` / `CAMERA_AVAILABLE` /
 `CAMERA_RECORDED_BUT_NONE_ACTIVE`. A pipeline is reported as `RUNNING` only
 when at least one inference actually completed. `measured_performance` is
 `NOT_MEASURED_WITHOUT_OBSERVED_FRAMES`; no FPS, latency, or accuracy figure is
@@ -45,7 +45,7 @@ suite never depends on a deployment's data.
 
 ## Configuration and Validation Boundaries
 
-- **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association and persistence, camera-to-pipeline wiring, continuous camera-health worker, audited event transitions, response lifecycles, migration-owned schema, and derived health semantics. Authentication/bootstrap are not implemented.
+- **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association and persistence, camera-to-pipeline wiring, continuous camera-health worker, audited event transitions, response lifecycles, migration-owned schema, JWT authentication/bootstrap, permission checks, and derived health semantics.
 - **PARTIALLY IMPLEMENTED:** Supported fire/smoke/restricted-zone event path is code-connected but blocked at runtime by missing weights and IGL configuration; other listed detector categories remain unavailable.
 - **IMPLEMENTED WITH LIMITS:** Operator-supplied configuration APIs, event-linked evidence, in-app queue, DB-count analytics, browser dashboard, event-driven local alarm, JWT authentication, SMTP email, and WhatsApp Cloud API delivery. Physical alarm output and other external channels remain unavailable.
 - **WEBCAM CHECK:** A previous local run records backend preview from device 0 at 640x480. In the current execution, device discovery and capture failed for device 0 and all probed indices, so that hardware result is historical and not reproduced here.

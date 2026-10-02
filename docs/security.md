@@ -3,10 +3,12 @@
 ## Implemented
 
 - Non-local (`production`/`staging`) settings reject `ALLOW_ANONYMOUS_ACCESS=true`; wildcard CORS is rejected in every environment.
+- Non-local settings reject SQLite URLs. Configure an operator-managed production database and its SQLAlchemy driver; production database operation is not validated by this repository run.
 - Camera URL user information, queries, and fragments are redacted in API output. Credential/query-bearing URLs require an operator-supplied Fernet key for storage.
 - Evidence is resolved within the configured evidence directory and verified against its stored SHA-256 before serving.
 - Audit rows written without a verified identity use a NULL actor; the application does not claim an identity it cannot authenticate.
 - Responses carry a sanitized `X-Request-ID` header.
+- Responses include `nosniff`, frame denial, a restrictive referrer policy, camera/microphone/geolocation permissions, and CSP directives for base URI, objects, and framing. HTTPS requests also receive HSTS; authentication endpoints return `Cache-Control: no-store`.
 - `.env` is Git-ignored. SQLite database files and generated caches are also Git-ignored and were removed from version control.
 
 ## Authentication
@@ -18,10 +20,10 @@
 
 ## Limitations
 
-- The browser holds its short-lived bearer token in tab-scoped session storage. Apply a restrictive deployment CSP and prevent script injection; no independent penetration test has been performed.
+- The browser holds its short-lived bearer token in tab-scoped session storage. The CSP intentionally leaves resource loading and API origins to the deployment/frontend topology; deployments should add an origin-specific CSP at their trusted reverse proxy. No independent penetration test has been performed.
 - JWT signing uses one shared HS256 key; plan secure distribution/rotation. Login throttling is process-local. No production secret manager, TLS termination, gateway rate limiting, or production deployment topology is bundled.
 - The app has no recovery email/password reset flow or multi-factor authentication. Admins can create accounts with initial passwords; users can change their own password after login.
-- SMTP credentials and WhatsApp Cloud API tokens are secret-typed environment settings and are never returned by status endpoints. Delivery logs record exception classes/status codes rather than raw provider response bodies, which could include sensitive information.
+- Database URLs, SMTP credentials, camera source URLs, and WhatsApp Cloud API tokens are secret-typed environment settings and are never returned by status endpoints. Delivery logs record exception classes/status codes rather than raw provider response bodies, which could include sensitive information.
 - SQLite is a local-development database and is not encrypted at rest by this code. No production database topology has been certified.
 - Audit entries currently do not persist request IDs as a dedicated audit field. No independent penetration test or security certification has been performed.
 - Legacy credential-bearing camera URLs are not automatically re-encrypted; key rotation requires a separately planned procedure.

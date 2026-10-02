@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 # Environments treated as non-production for deployment-safety reporting.
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     INITIAL_ADMIN_PASSWORD: SecretStr | None = None
 
     # Database
-    DATABASE_URL: str = f"sqlite:///{Path(__file__).resolve().parents[2] / 'data' / 'database.db'}"
+    DATABASE_URL: SecretStr = SecretStr(f"sqlite:///{Path(__file__).resolve().parents[2] / 'data' / 'database.db'}")
     SQLALCHEMY_ECHO: bool = False
     DATABASE_POOL_SIZE: int = Field(default=5, ge=1, le=50)
     DATABASE_MAX_OVERFLOW: int = Field(default=10, ge=0, le=100)
@@ -154,6 +155,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Anonymous access is only permitted in development/test"
             )
+        if not self.is_local_environment and make_url(self.DATABASE_URL.get_secret_value()).get_backend_name() == "sqlite":
+            raise ValueError("SQLite is local-development only; configure a production database URL")
         if not self.ALLOW_ANONYMOUS_ACCESS:
             jwt_secret = self.AUTH_JWT_SECRET_KEY.get_secret_value() if self.AUTH_JWT_SECRET_KEY else ""
             if len(jwt_secret.encode("utf-8")) < 32:

@@ -31,7 +31,7 @@ weights, compatible classes, and detector/zone configuration are available.
 validation. It reports `APPLICATION_UP` separately from `DATABASE_OK` /
 `DATABASE_UNAVAILABLE`, `MIGRATIONS_CURRENT` /
 `MIGRATIONS_PENDING_OR_UNAVAILABLE`, `MODEL_CONFIGURED` /
-`MODEL_NOT_CONFIGURED`, and `NO_CAMERA` / `CAMERA_AVAILABLE` /
+`MODEL_NOT_CONFIGURED`, and `NO_CAMERA` / `CAMERA_CONFIGURED_NOT_OBSERVED` / `CAMERA_AVAILABLE` /
 `CAMERA_RECORDED_BUT_NONE_ACTIVE`, plus `validation_status` and
 `measured_performance`. The process being up is never reported as health.
 

@@ -27,7 +27,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
-DATABASE_URL = settings.DATABASE_URL
+DATABASE_URL = settings.DATABASE_URL.get_secret_value()
 database_url = make_url(DATABASE_URL)
 IS_SQLITE = database_url.drivername.startswith("sqlite")
 

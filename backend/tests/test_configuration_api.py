@@ -1,7 +1,7 @@
 """Configuration API tests.
 
-Authentication was deliberately removed from this platform, so these tests no
-longer mint access tokens. They assert only what the endpoints actually return.
+These tests cover configuration validation, access control, safe serialization,
+and the endpoint behavior under test.
 """
 from pathlib import Path
 import sys

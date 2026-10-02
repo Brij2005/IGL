@@ -59,12 +59,7 @@ def client(test_db):
 
 @pytest.fixture
 def admin_auth_headers(test_db):
-    """Create a test admin identity and return an empty header set.
-
-    Authentication was deliberately removed from this build, so there is no token
-    to mint. The identity is still created because notification and audit paths
-    resolve named identities by role.
-    """
+    """Create an anonymous-mode admin identity for audit and notification paths."""
     admin_role = test_db.query(Role).filter(Role.name == "ADMIN").first()
     admin_user = User(
         username="camera_admin",

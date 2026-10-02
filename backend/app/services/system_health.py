@@ -35,28 +35,31 @@ MODEL_CONFIGURED = "MODEL_CONFIGURED"
 MODEL_NOT_CONFIGURED = "MODEL_NOT_CONFIGURED"
 CAMERA_AVAILABLE = "CAMERA_AVAILABLE"
 CAMERA_NONE_ACTIVE = "CAMERA_RECORDED_BUT_NONE_ACTIVE"
+CAMERA_CONFIGURED_NOT_OBSERVED = "CAMERA_CONFIGURED_NOT_OBSERVED"
 NO_CAMERA = "NO_CAMERA"
 VALIDATION_NOT_VALIDATED = "NOT_VALIDATED"
 
 _SELECT_ONE = select(literal(1))
 _COUNT_PLANT = select(func.count()).select_from(Plant)
 _COUNT_CAMERA = select(func.count()).select_from(Camera)
-_COUNT_ACTIVE_CAMERA = select(func.count()).select_from(Camera).where(Camera.is_active.is_(True))
+_ACTIVE_CAMERA_IDS = select(Camera.id).where(Camera.is_active.is_(True))
 
 
-def _database_facts() -> tuple[str, int, int, int]:
+def _database_facts() -> tuple[str, int, int, int, set[str]]:
     """Return the database state plus plant, camera, and active-camera counts."""
     try:
         with engine.connect() as connection:
             connection.execute(_SELECT_ONE)
+            active_camera_ids = set(connection.execute(_ACTIVE_CAMERA_IDS).scalars().all())
             return (
                 DATABASE_OK,
                 connection.execute(_COUNT_PLANT).scalar_one(),
                 connection.execute(_COUNT_CAMERA).scalar_one(),
-                connection.execute(_COUNT_ACTIVE_CAMERA).scalar_one(),
+                len(active_camera_ids),
+                active_camera_ids,
             )
     except Exception:
-        return DATABASE_UNAVAILABLE, 0, 0, 0
+        return DATABASE_UNAVAILABLE, 0, 0, 0, set()
 
 
 def _migration_state() -> str:
@@ -67,10 +70,18 @@ def _migration_state() -> str:
     return MIGRATIONS_CURRENT if current_heads == expected_heads else MIGRATIONS_PENDING
 
 
-def _camera_state(camera_count: int, active_camera_count: int) -> str:
+def _camera_state(camera_count: int, active_camera_ids: set[str], pipelines: list[dict]) -> str:
     if not camera_count:
         return NO_CAMERA
-    return CAMERA_AVAILABLE if active_camera_count else CAMERA_NONE_ACTIVE
+    if not active_camera_ids:
+        return CAMERA_NONE_ACTIVE
+    has_observed_frames = any(
+        item.get("camera_id") in active_camera_ids
+        and item.get("stream_status") == "RUNNING"
+        and item.get("frames_seen", 0) > 0
+        for item in pipelines
+    )
+    return CAMERA_AVAILABLE if has_observed_frames else CAMERA_CONFIGURED_NOT_OBSERVED
 
 
 def _igl_configuration_status(plant_count: int, database_state: str) -> str:
@@ -80,12 +91,12 @@ def _igl_configuration_status(plant_count: int, database_state: str) -> str:
 
 
 def collect_system_health() -> dict:
-    database_state, plant_count, camera_count, active_camera_count = _database_facts()
+    database_state, plant_count, camera_count, active_camera_count, active_camera_ids = _database_facts()
     migration_state = _migration_state()
     model = pipeline_manager.model_health()
     model_state = MODEL_CONFIGURED if model["available"] else MODEL_NOT_CONFIGURED
     pipelines = pipeline_manager.pipeline_status()
-    camera_state = _camera_state(camera_count, active_camera_count)
+    camera_state = _camera_state(camera_count, active_camera_ids, pipelines)
 
     # A pipeline counts as running only when a frame actually completed inference.
     running_pipelines = sum(1 for item in pipelines if item["inferences_completed"] > 0)
@@ -101,7 +112,7 @@ def collect_system_health() -> dict:
         degraded_reasons.append(migration_state)
     if model_state == MODEL_NOT_CONFIGURED:
         degraded_reasons.append(model_state)
-    if camera_state in (NO_CAMERA, CAMERA_NONE_ACTIVE):
+    if camera_state in (NO_CAMERA, CAMERA_NONE_ACTIVE, CAMERA_CONFIGURED_NOT_OBSERVED):
         degraded_reasons.append(camera_state)
     if camera_health_worker.status != "RUNNING":
         degraded_reasons.append(f"CAMERA_HEALTH_WORKER_{camera_health_worker.status}")
