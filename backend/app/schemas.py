@@ -1,54 +1,13 @@
-"""
-Pydantic schemas for API request validation and response serialization.
-Strictly excludes password hashes from all user response models.
+"""Pydantic schemas for identity records and audit output.
+
+There are no token, login or password schemas in this build: authentication was
+removed. An identity record names an operator that work can be assigned to; it
+cannot sign in, and no response contains credential material.
 """
 from datetime import datetime
-from typing import Optional, Any
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from typing import Any, Optional
 
-
-# bcrypt only consumes the first 72 bytes and rejects longer input in current
-# releases, so a longer password must be rejected rather than silently truncated.
-BCRYPT_MAX_PASSWORD_BYTES = 72
-MINIMUM_PASSWORD_LENGTH = 12
-
-
-def validate_password_bytes(password: str) -> str:
-    """Reject a password bcrypt cannot represent faithfully."""
-    if len(password.encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES:
-        raise ValueError("password must be at most 72 bytes when UTF-8 encoded")
-    return password
-
-
-# ============================================================================
-# TOKEN & AUTH SCHEMAS
-# ============================================================================
-
-class Token(BaseModel):
-    """JWT Token response schema."""
-    access_token: str
-    token_type: str = "bearer"
-    user_id: str
-    username: str
-    role: str
-
-
-class TokenData(BaseModel):
-    """Decoded JWT payload data."""
-    username: Optional[str] = None
-    user_id: Optional[str] = None
-    role: Optional[str] = None
-
-
-class LoginRequest(BaseModel):
-    """Authentication login request payload."""
-    username: str = Field(..., min_length=2, max_length=100)
-    password: str = Field(..., min_length=4, max_length=128)
-
-    @field_validator("password")
-    @classmethod
-    def check_password_size(cls, value: str) -> str:
-        return validate_password_bytes(value)
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ============================================================================
@@ -73,53 +32,42 @@ class RoleOut(RoleBase):
 
 
 # ============================================================================
-# USER SCHEMAS
+# IDENTITY SCHEMAS
 # ============================================================================
 
-class UserBase(BaseModel):
+class IdentityBase(BaseModel):
     username: str = Field(..., min_length=3, max_length=100)
     email: str = Field(..., min_length=5, max_length=255)
     full_name: str = Field(..., min_length=2, max_length=150)
     employee_code: Optional[str] = Field(None, max_length=50)
 
 
-class UserCreate(UserBase):
-    password: str = Field(..., min_length=MINIMUM_PASSWORD_LENGTH, max_length=128)
+class IdentityCreate(IdentityBase):
     role_name: Optional[str] = "OPERATOR"
 
-    @field_validator("password")
-    @classmethod
-    def check_password_size(cls, value: str) -> str:
-        return validate_password_bytes(value)
 
-
-class UserUpdate(BaseModel):
-    email: Optional[str] = Field(None, min_length=5, max_length=255)
-    full_name: Optional[str] = Field(None, min_length=2, max_length=150)
-    password: Optional[str] = Field(None, min_length=MINIMUM_PASSWORD_LENGTH, max_length=128)
-    employee_code: Optional[str] = Field(None, max_length=50)
-    is_active: Optional[bool] = None
-
-    @field_validator("password")
-    @classmethod
-    def check_password_size(cls, value: str | None) -> str | None:
-        return validate_password_bytes(value) if value is not None else None
-
-
-class UserRoleUpdate(BaseModel):
+class IdentityRoleUpdate(BaseModel):
     role_name: str = Field(..., min_length=2, max_length=50)
 
 
-class UserOut(UserBase):
-    """
-    Public User response model.
-    STRICT SECURITY RULE: Never includes hashed_password!
+class IdentityStateUpdate(BaseModel):
+    """Activate or deactivate an identity. Requires an audit reason."""
+
+    is_active: bool = True
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class IdentityOut(IdentityBase):
+    """Public identity response.
+
+    STRICT RULE: never includes hashed_password, which is always NULL.
     """
     id: str
     is_active: bool
     role: Optional[RoleOut] = None
     created_at: datetime
     updated_at: datetime
+    deactivated_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 

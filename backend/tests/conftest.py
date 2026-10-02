@@ -41,7 +41,6 @@ for _model_variable in (
     "CAMERA_URL_ENCRYPTION_KEY",
 ):
     os.environ.pop(_model_variable, None)
-os.environ.pop("BOOTSTRAP_ADMIN_ENABLED", None)
 
 
 def _alembic(*arguments: str) -> subprocess.CompletedProcess:
@@ -74,10 +73,14 @@ def test_database_path() -> Path:
 
 
 @pytest.fixture(autouse=True)
-def reset_login_rate_limiter():
-    """Clear the in-process login throttle so tests cannot affect each other."""
-    from app.auth import login_rate_limiter
+def reset_temporal_verification_registry():
+    """Clear in-process safety state so tests cannot leak observations into each other.
 
-    login_rate_limiter._failures.clear()
+    There is no login throttle to reset any more: this build has no
+    authentication and therefore no failed-login counter.
+    """
+    from app.services.safety_engine import temporal_registry
+
+    temporal_registry.reset()
     yield
-    login_rate_limiter._failures.clear()
+    temporal_registry.reset()

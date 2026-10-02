@@ -50,13 +50,15 @@ class CameraManager:
         # Initialize CameraHealth telemetry record.
         # Status is CONFIGURED and every measured value stays NULL: no frame
         # has been observed yet, so nothing may be reported as measured.
+        # is_frozen/is_black are NULL rather than False, because "not frozen"
+        # and "not black" are also claims about a frame nobody has seen.
         health = CameraHealth(
             camera_id=camera.id,
             status="CONFIGURED",
             fps=None,
             latency_ms=None,
-            is_frozen=False,
-            is_black=False,
+            is_frozen=None,
+            is_black=None,
             image_quality_score=None,
             inference_status="NOT_RUNNING",
             measured_fps=None,

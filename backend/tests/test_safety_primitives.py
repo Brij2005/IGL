@@ -8,8 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.engine.temporal_verifier import TemporalVerifier, VerificationPolicy
 from app.services.ppe_rules import assess_ppe_observation
-from app.services.zone_engine import evaluate_zone_membership, point_in_polygon
-from app.schemas_configuration import PPERuleCreate, ZoneCreate
+from app.services.zone_engine import evaluate_zone_membership, point_in_polygon, validate_polygon
+from app.schemas_configuration import OperatingThresholdCreate, PPERuleCreate, SafetyRuleCreate, ZoneCreate
 
 
 def test_temporal_verifier_requires_persistence_and_duration():
@@ -43,13 +43,35 @@ def test_configured_temporal_rule_requires_a_provenance_reference():
 
 
 def test_zone_membership_uses_supplied_polygon_only():
-    polygon = ((0, 0), (10, 0), (10, 10), (0, 10))
-    assert point_in_polygon((5, 5), polygon) is True
-    assert point_in_polygon((15, 5), polygon) is False
-    assert evaluate_zone_membership("test-zone", None, (5, 5)).state == "NOT_CONFIGURED"
+    polygon = ((0, 0), (1, 0), (1, 1), (0, 1))
+    assert point_in_polygon((0.5, 0.5), polygon) is True
+    assert point_in_polygon((1.5, 0.5), polygon) is False
+    assert evaluate_zone_membership("test-zone", None, (0.5, 0.5)).state == "NOT_CONFIGURED"
     assert evaluate_zone_membership("test-zone", polygon, None).state == "NOT_ASSESSABLE"
-    assert evaluate_zone_membership("test-zone", polygon, (5, 5)).inside is True
+    assert evaluate_zone_membership("test-zone", polygon, (0.5, 0.5)).inside is True
     assert point_in_polygon((5, 5), ((0, 0), (1, 1))) is None
+
+
+def test_zone_polygon_rejects_out_of_bounds_and_self_intersection():
+    assert validate_polygon([[0, 0], [1.1, 0], [1, 1]]) is None
+    assert validate_polygon([[0, 0], [1, 1], [0, 1], [0.8, 0.3]]) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"code": "RULE_1", "name": "Rule", "validation_status": "VALIDATED"},
+        {
+            "code": "RULE_2", "name": "Rule", "zone_id": "zone-1",
+            "metric": "confidence", "value": 0.8, "threshold_source": "CONFIGURED",
+            "source_reference": "OPERATOR-REFERENCE", "validation_status": "VALIDATED",
+        },
+    ],
+)
+def test_configuration_cannot_self_assert_validation(payload):
+    model = SafetyRuleCreate if "code" in payload and "zone_id" not in payload else OperatingThresholdCreate
+    with pytest.raises(ValueError):
+        model.model_validate(payload)
 
 
 def test_ppe_rule_requires_validated_model_and_visible_region():

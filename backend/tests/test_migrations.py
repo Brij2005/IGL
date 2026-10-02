@@ -31,6 +31,10 @@ DOMAIN_TABLES = {
     "model_versions", "model_metrics",
     "incident_state_transitions", "near_miss_state_transitions",
     "corrective_action_state_transitions",
+    # Safety policy configuration, escalation and correlation, added in a3f6d90c2b41.
+    "detector_configs", "safety_rules", "operating_thresholds",
+    "escalation_policies", "event_escalations", "event_correlations",
+    "notification_policies",
 }
 BASE_REVISION = "e822fa83c9db"
 DOMAIN_TABLE_COUNT = len(DOMAIN_TABLES)

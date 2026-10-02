@@ -6,24 +6,14 @@ From the project root, install the pinned dependencies, copy `.env.example` to `
 
 ```powershell
 python -m pip install -r backend/requirements.txt
-Copy-Item .env.example .env
-alembic -c backend/alembic.ini upgrade head
-python scripts/bootstrap_admin.py
-uvicorn backend.app.main:app --reload
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+python -m alembic -c backend/alembic.ini upgrade head
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 The API refuses to start unless the database revision matches the Alembic head. Schema is owned exclusively by the migrations; `init_db()` no longer creates tables and raises instead.
 
-The one-time bootstrap seeds the fixed platform roles and creates the first administrator only when the users table is empty. Startup never creates an administrator.
-
-Two bootstrap modes are available, neither of which has a default credential:
-
-- Interactive (default): prompts for a new username, email, full name, and password of at least 12 characters, without echoing it.
-- Non-interactive: set `BOOTSTRAP_ADMIN_ENABLED=true` plus every `BOOTSTRAP_ADMIN_*` value, then run `python scripts/bootstrap_admin.py --configured`. Remove those values afterwards.
-
-Either way, bootstrap refuses to run once any user exists, rejects a password that bcrypt cannot represent, and never logs a credential.
-
-Login throttling is configurable through `LOGIN_RATE_LIMIT_ATTEMPTS` and `LOGIN_RATE_LIMIT_WINDOW_SECONDS`. The current limiter is in-process; multi-worker deployments need a shared rate-limit store.
+This local build has no authentication. Keep it bound to localhost; do not expose it to an untrusted network or assume an upstream proxy identity is enforced by this API.
 
 The default SQLite location resolves relative to the project root. Migrations add schema to an existing database; do not delete, recreate, or reset a database as a setup step.
 
@@ -39,11 +29,13 @@ python -m pytest backend/tests -q
 
 Set `MODEL_WEIGHTS_PATH` to an existing local model file. `MODEL_NAME`, `MODEL_VERSION`, and `MODEL_CONFIDENCE_THRESHOLD` provide traceable metadata. The service does not download weights. An absent file yields `MODEL_NOT_CONFIGURED`; an invalid configured path yields `MODEL_INVALID_WEIGHTS`.
 
-## Production Safeguards
+## Deployment Boundary
 
-Set `ENVIRONMENT=production`, provide a unique `SECRET_KEY` with at least 32 characters through environment configuration, and set explicit `BACKEND_CORS_ORIGINS`. Production startup rejects the development key and wildcard CORS. Never commit `.env`, credentials, or camera URLs containing secrets. The `.env.example` key is development-only.
+This build has no authentication. `ENVIRONMENT=production` or `staging` rejects `ALLOW_ANONYMOUS_ACCESS=true`; setting it false makes protected routes return 401 because no authentication implementation exists. This is not a production deployment configuration. Keep the demo bound to localhost. Before any shared deployment, implement and review authentication/authorization, select a production database, configure TLS/reverse proxy/network controls, and perform security review. Wildcard CORS is rejected; use exact origins.
 
-Camera API responses remove RTSP URL user information and redact common credential query parameters. Restrict access to camera configuration because the application still needs the original stream URL to connect.
+Run the static dashboard from a second project-root terminal with `python -m http.server 8001 --directory frontend`; open `http://127.0.0.1:8001`.
+
+Camera API responses redact URL user information and query parameters. Credential- or query-bearing camera URLs require `CAMERA_URL_ENCRYPTION_KEY`; losing that key makes stored values unreadable. Do not commit `.env`, credentials, or camera URLs containing secrets.
 
 ### Camera URL Encryption
 

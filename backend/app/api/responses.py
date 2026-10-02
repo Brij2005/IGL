@@ -1,4 +1,4 @@
-"""Safety response APIs: acknowledgement, assignment, incident, near-miss, action.
+﻿"""Safety response APIs: acknowledgement, assignment, incident, near-miss, action.
 
 Every write in this module is an operator action against a record that already
 exists. There is no endpoint that generates an Event, Incident, or NearMiss
@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 try:
-    from app.auth import log_audit_event, require_permission, require_role
+    from app.access_control import log_audit_event, require_permission
     from app.database import get_db
     from app.models import (
         Acknowledgement,
@@ -59,7 +59,7 @@ try:
         assign_event,
     )
 except ImportError:
-    from backend.app.auth import log_audit_event, require_permission, require_role
+    from backend.app.access_control import log_audit_event, require_permission
     from backend.app.database import get_db
     from backend.app.models import (
         Acknowledgement,
@@ -175,7 +175,7 @@ def corrective_action_payload(action: CorrectiveAction) -> dict:
 # ============================================================================
 
 @router.get("/lifecycle-states", response_model=ResponseLifecycleStatesOut)
-def get_lifecycle_states(user: User = Depends(require_permission("events:view"))):
+def get_lifecycle_states(actor: Optional[User] = Depends(require_permission("events:view"))):
     """Return the declared state machines for every response entity."""
     return {
         "incident": allowed_states(INCIDENT_TRANSITIONS),
@@ -193,7 +193,7 @@ def get_lifecycle_states(user: User = Depends(require_permission("events:view"))
 def list_acknowledgements(
     event_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     get_event_or_404(db, event_id)
     return (
@@ -210,19 +210,24 @@ def acknowledge_event_endpoint(
     payload: AcknowledgementCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("events:acknowledge")),
 ):
     """Acknowledge an event. Records the acknowledgement and the state change
     together; neither can be written without the other."""
     event = get_event_or_404(db, event_id)
     previous_state = event.workflow_state
     try:
-        acknowledgement = acknowledge_event(db, event, user=user, notes=payload.notes)
+        acknowledgement = acknowledge_event(
+            db,
+            event,
+            actor_id=actor.id if actor else None,
+            notes=payload.notes,
+        )
     except WorkflowPreconditionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="EVENT_ACKNOWLEDGED",
         resource_type="EVENT",
         resource_id=event.id,
@@ -244,7 +249,7 @@ def acknowledge_event_endpoint(
 def list_assignments(
     event_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     get_event_or_404(db, event_id)
     return (
@@ -261,7 +266,7 @@ def assign_event_endpoint(
     payload: AssignmentCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("events:assign")),
 ):
     """Assign an acknowledged event to an active user."""
     event = get_event_or_404(db, event_id)
@@ -270,13 +275,13 @@ def assign_event_endpoint(
         raise HTTPException(status_code=404, detail="Assignee not found")
     try:
         assignment = assign_event(
-            db, event, assignee=assignee, assigner=user, due_at=payload.due_at, notes=payload.notes
+            db, event, assignee=assignee, assigner=actor, due_at=payload.due_at, notes=payload.notes
         )
     except WorkflowPreconditionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="EVENT_ASSIGNED",
         resource_type="EVENT",
         resource_id=event.id,
@@ -301,7 +306,7 @@ def list_incidents(
     limit: int = Query(default=RESPONSE_PAGE_SIZE, ge=1, le=RESPONSE_MAX_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     query = db.query(Incident)
     if status_filter:
@@ -317,7 +322,7 @@ def create_incident(
     payload: IncidentCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("incidents:manage")),
 ):
     """Raise an incident against a persisted event.
 
@@ -331,14 +336,14 @@ def create_incident(
         description=payload.description,
         severity=payload.severity,
         status="OPEN",
-        reported_by_user_id=user.id,
+        reported_by_user_id=actor.id if actor else None,
     )
     db.add(incident)
     db.commit()
     db.refresh(incident)
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="INCIDENT_RAISED",
         resource_type="INCIDENT",
         resource_id=incident.id,
@@ -352,7 +357,7 @@ def create_incident(
 def get_incident(
     incident_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if incident is None:
@@ -366,7 +371,7 @@ def transition_incident_endpoint(
     payload: TransitionRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("incidents:manage")),
 ):
     previous_state = db.query(Incident).filter(Incident.id == incident_id).first()
     if previous_state is None:
@@ -374,13 +379,13 @@ def transition_incident_endpoint(
     before = previous_state.status
     try:
         incident = transition_incident(
-            db, previous_state, payload.new_state, user_id=user.id, reason=payload.reason
+            db, previous_state, payload.new_state, user_id=actor.id if actor else None, reason=payload.reason
         )
     except InvalidStateTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="INCIDENT_TRANSITIONED",
         resource_type="INCIDENT",
         resource_id=incident.id,
@@ -394,7 +399,7 @@ def transition_incident_endpoint(
 def list_incident_transitions(
     incident_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if incident is None:
@@ -413,7 +418,7 @@ def list_near_misses(
     limit: int = Query(default=RESPONSE_PAGE_SIZE, ge=1, le=RESPONSE_MAX_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     query = db.query(NearMiss)
     if status_filter:
@@ -429,7 +434,7 @@ def create_near_miss(
     payload: NearMissCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("incidents:manage")),
 ):
     """Raise a near-miss against a persisted event."""
     get_event_or_404(db, payload.event_id)
@@ -446,7 +451,7 @@ def create_near_miss(
     db.refresh(near_miss)
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="NEAR_MISS_REPORTED",
         resource_type="NEAR_MISS",
         resource_id=near_miss.id,
@@ -462,7 +467,7 @@ def transition_near_miss_endpoint(
     payload: TransitionRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("incidents:manage")),
 ):
     record = db.query(NearMiss).filter(NearMiss.id == near_miss_id).first()
     if record is None:
@@ -470,13 +475,13 @@ def transition_near_miss_endpoint(
     before = record.status
     try:
         near_miss = transition_near_miss(
-            db, record, payload.new_state, user_id=user.id, reason=payload.reason
+            db, record, payload.new_state, user_id=actor.id if actor else None, reason=payload.reason
         )
     except InvalidStateTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="NEAR_MISS_TRANSITIONED",
         resource_type="NEAR_MISS",
         resource_id=near_miss.id,
@@ -490,7 +495,7 @@ def transition_near_miss_endpoint(
 def list_near_miss_transitions(
     near_miss_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     record = db.query(NearMiss).filter(NearMiss.id == near_miss_id).first()
     if record is None:
@@ -509,7 +514,7 @@ def list_corrective_actions(
     limit: int = Query(default=RESPONSE_PAGE_SIZE, ge=1, le=RESPONSE_MAX_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     query = db.query(CorrectiveAction)
     if status_filter:
@@ -525,7 +530,7 @@ def create_corrective_action(
     payload: CorrectiveActionCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("corrective_actions:manage")),
 ):
     """Create a corrective action against exactly one existing record."""
     try:
@@ -562,7 +567,7 @@ def create_corrective_action(
     db.refresh(action)
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="CORRECTIVE_ACTION_CREATED",
         resource_type="CORRECTIVE_ACTION",
         resource_id=action.id,
@@ -578,7 +583,7 @@ def transition_corrective_action_endpoint(
     payload: TransitionRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+    actor: Optional[User] = Depends(require_permission("corrective_actions:manage")),
 ):
     record = db.query(CorrectiveAction).filter(CorrectiveAction.id == action_id).first()
     if record is None:
@@ -586,13 +591,13 @@ def transition_corrective_action_endpoint(
     before = record.status
     try:
         action = transition_corrective_action(
-            db, record, payload.new_state, user_id=user.id, reason=payload.reason
+            db, record, payload.new_state, user_id=actor.id if actor else None, reason=payload.reason
         )
     except InvalidStateTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     log_audit_event(
         db=db,
-        user_id=user.id,
+        user_id=actor.id if actor else None,
         action="CORRECTIVE_ACTION_TRANSITIONED",
         resource_type="CORRECTIVE_ACTION",
         resource_id=action.id,
@@ -606,7 +611,7 @@ def transition_corrective_action_endpoint(
 def list_corrective_action_transitions(
     action_id: str,
     db: Session = Depends(get_db),
-    user: User = Depends(require_permission("events:view")),
+    actor: Optional[User] = Depends(require_permission("events:view")),
 ):
     record = db.query(CorrectiveAction).filter(CorrectiveAction.id == action_id).first()
     if record is None:

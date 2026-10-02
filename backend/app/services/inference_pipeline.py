@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -25,6 +25,52 @@ except ImportError:
 logger = logging.getLogger("igl.ai.pipeline")
 
 
+def build_observation_sink(
+    camera_id: str,
+    model_health: Callable[[], dict[str, Any]],
+) -> Callable[[datetime, np.ndarray, list, tuple], None] | None:
+    """Return a sink that persists detections and evaluates configured detectors.
+
+    The sink opens its own short-lived session so the ingestion thread never
+    shares a database session with a request. It returns None when no database is
+    reachable, which leaves the pipeline in an explicitly non-persisting state
+    rather than pretending detections were recorded.
+    """
+    try:
+        from app.database import SessionLocal
+    except ImportError:
+        try:
+            from backend.app.database import SessionLocal
+        except ImportError:  # pragma: no cover
+            return None
+
+    from app.models import Camera
+    from app.services.safety_orchestrator import safety_orchestrator
+
+    def sink(timestamp: datetime, frame: np.ndarray, detections: list, tracks: tuple) -> None:
+        db = SessionLocal()
+        try:
+            camera = db.query(Camera).filter(Camera.id == camera_id, Camera.is_active.is_(True)).first()
+            if camera is None:
+                # The camera is no longer active or was removed; there is nothing
+                # to attribute an observation to.
+                return
+            safety_orchestrator.persist_detections(db, camera, detections, tracks)
+            safety_orchestrator.evaluate_frame(
+                db,
+                camera,
+                timestamp=timestamp,
+                frame=frame,
+                detections=detections,
+                tracks=tracks,
+                model_health=model_health(),
+            )
+        finally:
+            db.close()
+
+    return sink
+
+
 class CameraInferencePipeline:
     def __init__(
         self,
@@ -33,11 +79,19 @@ class CameraInferencePipeline:
         tracker: IoUTracker,
         inference_lock: threading.Lock,
         frame_buffer: FrameBuffer | None = None,
+        observation_sink: Callable[[datetime, np.ndarray, list, tuple], None] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.model = model
         self.tracker = tracker
         self.inference_lock = inference_lock
+        # Optional database-backed sink that persists detections and evaluates
+        # configured detectors. It is absent in contexts without a session (for
+        # example unit tests), in which case detections stay in memory only and
+        # no event can be created.
+        self.observation_sink = observation_sink
+        self._observations_delivered = 0
+        self._observation_sink_failures = 0
         self.frame_buffer = frame_buffer or FrameBuffer(
             settings.FRAME_BUFFER_RETENTION_SECONDS,
             settings.FRAME_BUFFER_MAX_FRAMES,
@@ -109,7 +163,7 @@ class CameraInferencePipeline:
         self._last_inference_timestamp = timestamp
         self._detection_count += len(detections)
         try:
-            self.tracker.update(self.camera_id, detections, timestamp)
+            tracks = self.tracker.update(self.camera_id, detections, timestamp)
         except Exception as exc:
             self._tracking_failures += 1
             self._last_error_type = type(exc).__name__
@@ -123,7 +177,31 @@ class CameraInferencePipeline:
         with self._lock:
             self._state = "RUNNING"
             self._last_error_type = None
+        self._deliver_observations(timestamp, frame, detections, tracks)
         return detections
+
+    def _deliver_observations(self, timestamp, frame, detections, tracks) -> None:
+        """Hand real detections to the safety orchestrator.
+
+        A sink failure is recorded and does not change the detection result: the
+        frame was still observed, so hiding it would be the less truthful option.
+        """
+        if self.observation_sink is None:
+            return
+        try:
+            self.observation_sink(timestamp, frame, detections, tracks)
+            self._observations_delivered += 1
+        except Exception as exc:
+            self._observation_sink_failures += 1
+            self._last_error_type = type(exc).__name__
+            logger.error(
+                "Safety observation delivery failed",
+                extra={
+                    "component": "inference_pipeline",
+                    "camera_id": self.camera_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -144,6 +222,9 @@ class CameraInferencePipeline:
                 "inference_failures": self._inference_failures,
                 "tracking_failures": self._tracking_failures,
                 "detection_count": self._detection_count,
+                "observations_delivered": self._observations_delivered,
+                "observation_sink_failures": self._observation_sink_failures,
+                "observation_sink_configured": self.observation_sink is not None,
                 "last_frame_timestamp": self._last_frame_timestamp,
                 "last_inference_timestamp": self._last_inference_timestamp,
                 "last_error_type": self._last_error_type,
@@ -195,6 +276,7 @@ class InferencePipelineManager:
         self.tracker = IoUTracker()
         self._inference_lock = threading.Lock()
         self._pipelines: dict[str, CameraInferencePipeline] = {}
+        self._operator_stopped: set[str] = set()
         self._lock = threading.RLock()
         self._model_prepared = False
 
@@ -205,31 +287,55 @@ class InferencePipelineManager:
                 self._model_prepared = True
             return self.model.health()
 
-    def start_stream(self, camera_id: str, stream_url: str, target_fps: float = 25.0) -> CameraInferencePipeline:
+    def start_stream(
+        self,
+        camera_id: str,
+        stream_url: str,
+        target_fps: float = 25.0,
+        *,
+        operator_start: bool = False,
+    ) -> CameraInferencePipeline | None:
         with self._lock:
+            if camera_id in self._operator_stopped and not operator_start:
+                return self._pipelines.get(camera_id)
+            if operator_start:
+                self._operator_stopped.discard(camera_id)
             current = self._pipelines.get(camera_id)
             if current and current.reader and current.reader.stream_url == stream_url and current.status()["pipeline_state"] != "STOPPED":
                 return current
             self.stop_stream(camera_id)
             self.prepare_model()
             reader = ingestion_manager.start_stream(camera_id, stream_url, target_fps)
-            pipeline = CameraInferencePipeline(camera_id, self.model, self.tracker, self._inference_lock)
+            pipeline = CameraInferencePipeline(
+                camera_id,
+                self.model,
+                self.tracker,
+                self._inference_lock,
+                observation_sink=build_observation_sink(camera_id, self.model.health),
+            )
             pipeline.start(reader)
             self._pipelines[camera_id] = pipeline
             return pipeline
 
-    def stop_stream(self, camera_id: str) -> None:
+    def stop_stream(self, camera_id: str, *, operator_initiated: bool = False) -> None:
         with self._lock:
+            if operator_initiated:
+                self._operator_stopped.add(camera_id)
             pipeline = self._pipelines.pop(camera_id, None)
             if pipeline:
                 pipeline.stop()
             ingestion_manager.stop_stream(camera_id)
+
+    def is_operator_stopped(self, camera_id: str) -> bool:
+        with self._lock:
+            return camera_id in self._operator_stopped
 
     def stop_all(self) -> None:
         with self._lock:
             for camera_id in list(self._pipelines):
                 self.stop_stream(camera_id)
             ingestion_manager.stop_all()
+            self._operator_stopped.clear()
 
     def model_health(self) -> dict[str, Any]:
         return self.model.health()

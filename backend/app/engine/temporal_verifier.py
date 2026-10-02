@@ -80,8 +80,18 @@ class TemporalVerifier:
 
             candidate = self._candidates.get(subject_id)
             if candidate is None or (observed_at - candidate.last_seen).total_seconds() > self.policy.maximum_gap_seconds:
+                # A new candidate window. It is still checked against the policy
+                # rather than reported as DETECTED unconditionally, because a
+                # policy may legitimately be satisfied by a single observation
+                # with no required duration.
                 candidate = _Candidate(observed_at, observed_at, 1)
                 self._candidates[subject_id] = candidate
+                verified = (
+                    candidate.observations >= self.policy.minimum_observations
+                    and 0.0 >= self.policy.minimum_duration_seconds
+                )
+                if verified:
+                    return self._result(subject_id, "VERIFIED", 1, 0.0, None)
                 return self._result(subject_id, "DETECTED", 1, 0.0, None)
 
             if observed_at <= candidate.last_seen:

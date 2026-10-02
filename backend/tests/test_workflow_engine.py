@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.database import Base
 from app.database import get_db
 from app.models import AuditLog, Camera, Event, EventStateTransition, Role, User
-from app.auth import create_access_token, hash_password
-from app.main import app, seed_default_roles
+
+from app.main import app, seed_reference_roles
 from app.services.workflow_engine import InvalidWorkflowTransition, transition_event
 from fastapi.testclient import TestClient
 
@@ -62,19 +62,17 @@ def test_event_workflow_rejects_invalid_jump_and_empty_reason(db_session):
 
 
 def test_event_api_rejects_invalid_transition_and_audits_valid_transition(db_session):
-    seed_default_roles(db_session)
+    seed_reference_roles(db_session)
     admin_role = db_session.query(Role).filter_by(name="ADMIN").one()
     admin = User(
         username="workflow_test_admin",
         email="workflow-admin@example.test",
         full_name="Workflow Test Admin",
-        hashed_password=hash_password("test-only-password"),
-        role_id=admin_role.id,
+        role_id=admin_role.id
     )
     db_session.add(admin)
     db_session.commit()
     event = create_event(db_session)
-    token = create_access_token({"sub": admin.username, "user_id": admin.id, "role": "ADMIN"})
 
     def override_db():
         yield db_session
@@ -82,17 +80,19 @@ def test_event_api_rejects_invalid_transition_and_audits_valid_transition(db_ses
     app.dependency_overrides[get_db] = override_db
     try:
         with TestClient(app) as client:
-            headers = {"Authorization": f"Bearer {token}"}
+            # No token: this build has no authentication, so the audit row will
+            # record an unattributed actor rather than an identified one.
+            headers = {}
             invalid = client.post(
                 f"/api/v1/events/{event.id}/transitions",
                 json={"new_state": "CLOSED", "reason": "test-only invalid jump"},
-                headers=headers,
+                headers=headers
             )
             assert invalid.status_code == 409
             valid = client.post(
                 f"/api/v1/events/{event.id}/transitions",
                 json={"new_state": "UNACKNOWLEDGED", "reason": "test-only valid transition"},
-                headers=headers,
+                headers=headers
             )
             assert valid.status_code == 200
             assert valid.json()["workflow_state"] == "UNACKNOWLEDGED"
@@ -102,5 +102,13 @@ def test_event_api_rejects_invalid_transition_and_audits_valid_transition(db_ses
     transition = db_session.query(EventStateTransition).filter_by(event_id=event.id).one()
     audit = db_session.query(AuditLog).filter_by(action="EVENT_WORKFLOW_TRANSITIONED").one()
     assert transition.previous_state == "NEW"
-    assert transition.user_id == admin.id
-    assert audit.details_json == {"previous_state": "NEW", "new_state": "UNACKNOWLEDGED"}
+    # No request in this build proves an identity, so the transition is recorded
+    # without an attributed actor rather than credited to the seeded admin.
+    assert transition.user_id is None
+    # The audit row records the access model too, because no request in this
+    # build proves an identity.
+    assert audit.details_json == {
+        "previous_state": "NEW",
+        "new_state": "UNACKNOWLEDGED",
+        "access_state": "NO_AUTHENTICATION_ANONYMOUS_ACCESS",
+    }

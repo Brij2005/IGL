@@ -24,7 +24,7 @@ for import_path in (str(PROJECT_ROOT), str(BACKEND_ROOT)):
 import cv2
 import numpy as np
 
-from ai_models.ultralytics_adapter import UltralyticsModelAdapter
+from ai_models.ultralytics_adapter import UltralyticsModelAdapter, weights_checksum
 from app.config import settings
 from app.services.inference_pipeline import CameraInferencePipeline
 from app.services.tracker import IoUTracker
@@ -169,6 +169,8 @@ def create_report(
             raise ValueError("REAL_INPUT_VALIDATED cannot be reported while errors are recorded")
         if reader_frames <= 0 or processed_frames <= 0 or inference_count <= 0:
             raise ValueError("REAL_INPUT_VALIDATED requires observed frames and completed inference")
+        if int(pipeline_status.get("inferences_completed", 0)) <= 0:
+            raise ValueError("REAL_INPUT_VALIDATED requires at least one completed inference, not only an attempt")
 
     report = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -184,6 +186,7 @@ def create_report(
             "name": settings.MODEL_NAME or model.model_name,
             "version": settings.MODEL_VERSION or model.model_version,
             "weights_identifier": model.weights_path.name if model.weights_path else None,
+            "weights_checksum_sha256": weights_checksum(model.weights_path),
             "confidence_threshold": model.confidence_threshold,
             "device": model.device,
             "load_status": model.health()["status"],
@@ -205,6 +208,8 @@ def create_report(
             "frames_received": reader_frames,
             "frames_processed": processed_frames,
             "inference_count": inference_count,
+            "inference_attempt_count": model.health().get("inference_attempt_count", inference_count),
+            "inference_failure_count": model.health().get("inference_failure_count", 0),
             "inferences_completed": int(pipeline_status.get("inferences_completed", 0)),
             "average_inference_latency_ms": model.health()["average_inference_latency_ms"],
             "processing_fps": processing_fps,

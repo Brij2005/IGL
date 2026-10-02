@@ -9,12 +9,15 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.database import get_migration_state
-from app.main import app
-from app.models import User
+from app.database import Base, get_migration_state
+from app.main import app, seed_reference_roles
+from app.models import Role, User
 
 
 def test_configured_test_database_is_at_migration_head():
@@ -57,6 +60,31 @@ def test_startup_seeds_only_fixed_platform_roles():
         session.close()
 
 
+def test_reference_role_seeding_preserves_existing_configuration():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        session.add(Role(
+            name="SAFETY_OFFICER",
+            description="Operator-maintained description",
+            permissions_json=["operator:maintained"],
+        ))
+        session.commit()
+
+        seed_reference_roles(session)
+
+        role = session.query(Role).filter(Role.name == "SAFETY_OFFICER").one()
+        assert role.description == "Operator-maintained description"
+        assert role.permissions_json == ["operator:maintained"]
+        assert {item.name for item in session.query(Role).all()} == {
+            "ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER", "OPERATOR"
+        }
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_startup_refuses_an_unmigrated_database(monkeypatch):
     import app.main as main_module
 
@@ -73,17 +101,23 @@ def test_every_route_responds_after_startup():
     with TestClient(app) as client:
         assert client.get("/").status_code == 200
         assert client.get("/api/v1/openapi.json").status_code == 200
-        # Protected routes must reject anonymous access rather than leak data.
-        assert client.get("/api/v1/system/health").status_code in (401, 403)
-        assert client.get("/api/v1/analytics/summary").status_code in (401, 403)
+        # This build has no authentication, so these routes are reachable. The
+        # test records that deliberately permissive behaviour rather than
+        # asserting a protection that this build does not have.
+        assert client.get("/api/v1/system/health").status_code == 200
+        assert client.get("/api/v1/analytics/summary").status_code == 200
+        # A removed route must be gone, not silently absent.
+        assert client.post("/api/v1/auth/login", json={}).status_code == 404
 
 
 def test_openapi_documents_every_registered_router():
     with TestClient(app) as client:
         paths = client.get("/api/v1/openapi.json").json()["paths"]
     for prefix in (
-        "/api/v1/auth/login", "/api/v1/cameras", "/api/v1/events", "/api/v1/analytics/summary",
+        "/api/v1/cameras", "/api/v1/events", "/api/v1/analytics/summary",
         "/api/v1/notifications", "/api/v1/system/health", "/api/v1/configuration/plants",
-        "/api/v1/events/{event_id}/evidence",
+        "/api/v1/events/{event_id}/evidence", "/api/v1/cameras/webcam/devices"
     ):
         assert any(path.startswith(prefix) for path in paths), prefix
+    # Authentication routes must not reappear in the API document.
+    assert not any(path.startswith("/api/v1/auth") for path in paths)

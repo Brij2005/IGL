@@ -13,7 +13,7 @@ from pydantic import SecretStr
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ai_models.ultralytics_adapter import UltralyticsModelAdapter
+from ai_models.ultralytics_adapter import UltralyticsModelAdapter, weights_checksum
 from app.config import settings
 from app.services.inference_pipeline import CameraInferencePipeline
 from app.services.tracker import IoUTracker
@@ -36,6 +36,35 @@ def test_missing_source_and_model_are_reported_without_starting_pipeline(monkeyp
 def test_missing_model_configuration_is_explicit():
     adapter = UltralyticsModelAdapter(None)
     assert run_inference.validate_model_configuration(adapter) == "MODEL_NOT_CONFIGURED"
+
+
+def test_model_identity_is_a_checksum_of_the_actual_file(tmp_path):
+    """A name, version, and filename cannot prove which bytes were evaluated."""
+    import hashlib
+
+    assert weights_checksum(None) is None
+    assert weights_checksum(tmp_path / "absent.pt") is None
+
+    weights = tmp_path / "provided.pt"
+    payload = b"fixture-weights-bytes"
+    weights.write_bytes(payload)
+    expected = hashlib.sha256(payload).hexdigest()
+    assert weights_checksum(weights) == expected
+
+    adapter = UltralyticsModelAdapter(str(weights), "fixture-model", "fixture-version")
+    assert adapter.health()["weights_checksum_sha256"] == expected
+
+    report = run_inference.create_report(
+        source="fixture",
+        source_type="LOCAL_VIDEO",
+        model=adapter,
+        reader=None,
+        pipeline=None,
+        processing_seconds=0.0,
+        validation_status="NOT_VALIDATED",
+        errors=["MODEL_NOT_CONFIGURED"]
+    )
+    assert report["model"]["weights_checksum_sha256"] == expected
 
 
 def test_invalid_model_path_is_explicit(monkeypatch, tmp_path):
@@ -130,7 +159,7 @@ def test_report_contains_only_safe_source_identifier_and_no_igl_claim():
         pipeline=None,
         processing_seconds=0,
         validation_status="NOT_VALIDATED",
-        errors=[],
+        errors=[]
     )
     serialized = json.dumps(report)
     assert f"{source_user}:{source_password}@" not in serialized
@@ -153,7 +182,7 @@ def test_report_assembly_is_complete_at_construction_time():
         processing_seconds=0,
         validation_status="NOT_VALIDATED",
         errors=[],
-        stream_terminal_state="SOURCE_UNAVAILABLE",
+        stream_terminal_state="SOURCE_UNAVAILABLE"
     )
     assert set(report) == {
         "generated_at_utc",
@@ -182,7 +211,7 @@ def test_report_refuses_real_input_validated_without_observed_work():
             pipeline=None,
             processing_seconds=1.0,
             validation_status="REAL_INPUT_VALIDATED",
-            errors=[],
+            errors=[]
         )
     with pytest.raises(ValueError, match="authorized real input"):
         run_inference.create_report(
@@ -194,7 +223,7 @@ def test_report_refuses_real_input_validated_without_observed_work():
             processing_seconds=1.0,
             validation_status="REAL_INPUT_VALIDATED",
             errors=[],
-            input_provenance=run_inference.TEST_FIXTURE,
+            input_provenance=run_inference.TEST_FIXTURE
         )
     with pytest.raises(ValueError, match="errors are recorded"):
         run_inference.create_report(
@@ -205,7 +234,7 @@ def test_report_refuses_real_input_validated_without_observed_work():
             pipeline=None,
             processing_seconds=1.0,
             validation_status="REAL_INPUT_VALIDATED",
-            errors=["NO_FRAMES_RECEIVED"],
+            errors=["NO_FRAMES_RECEIVED"]
         )
     with pytest.raises(ValueError, match="Invalid validation status"):
         run_inference.create_report(
@@ -216,7 +245,7 @@ def test_report_refuses_real_input_validated_without_observed_work():
             pipeline=None,
             processing_seconds=1.0,
             validation_status="ALMOST_VALIDATED",
-            errors=[],
+            errors=[]
         )
 
 
@@ -228,7 +257,7 @@ def test_blocked_report_records_reason_without_claiming_pipeline_work(monkeypatc
         source="rtsp://camera.invalid/live",
         source_type="RTSP",
         model=model,
-        reason="MODEL_NOT_CONFIGURED",
+        reason="MODEL_NOT_CONFIGURED"
     )
     assert report["validation_status"] == "NOT_VALIDATED"
     assert report["pipeline"]["frames_processed"] == 0
@@ -241,7 +270,7 @@ def test_blocked_report_records_reason_without_claiming_pipeline_work(monkeypatc
         "RTSP",
         model,
         5.0,
-        report_path,
+        report_path
     )
     assert exit_code == 2
     assert error == "MODEL_NOT_CONFIGURED"
@@ -322,7 +351,7 @@ def test_successful_report_assembly_uses_test_doubles_only(monkeypatch, tmp_path
         TestModel(),
         None,
         report_path,
-        run_inference.TEST_FIXTURE,
+        run_inference.TEST_FIXTURE
     )
 
     assert exit_code == 0
@@ -391,7 +420,7 @@ def test_failed_fixture_run_is_reported_as_not_validated(monkeypatch, tmp_path):
         model,
         None,
         report_path,
-        run_inference.TEST_FIXTURE,
+        run_inference.TEST_FIXTURE
     )
 
     assert exit_code == 1
@@ -411,5 +440,5 @@ def test_run_validation_rejects_unknown_input_provenance(tmp_path):
             UltralyticsModelAdapter(None),
             None,
             tmp_path / "unused.json",
-            "SYNTHETIC_LOOKING_DATA",
+            "SYNTHETIC_LOOKING_DATA"
         )

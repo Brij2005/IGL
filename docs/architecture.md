@@ -2,15 +2,21 @@
 
 ## Phase 4 Data Path
 
-`Camera configuration -> StreamReader -> bounded FrameBuffer -> UltralyticsModelAdapter -> Detection -> IoUTracker`
+`Camera/webcam/file/RTSP -> StreamReader -> bounded FrameBuffer -> UltralyticsModelAdapter -> Detection -> IoUTracker -> SafetyEventOrchestrator`
 
-`StreamReader` accepts a configured RTSP/HTTP source or local video path. Frames are timestamped and copied into a thread-safe buffer bounded by retention time, frame count, and bytes. The adapter loads only an explicitly configured local weights file. Missing or invalid weights produce a visible model status and zero detections. Inference access is serialized across camera workers.
+`StreamReader` accepts a configured webcam, RTSP/HTTP source, or local video path. Webcam discovery and preview reuse the same reader and bounded frame buffer; the browser preview is emitted only from observed frames. Frames are timestamped and copied into a thread-safe buffer bounded by retention time, frame count, and bytes. The adapter loads only an explicitly configured local weights file. Missing or invalid weights leave inference unavailable; no detections are substituted. Inference access is serialized across camera workers.
 
 Each `Detection` validates camera, timestamp, class, confidence, bounding box, and model metadata. Each `VisualTrack` has a generated visual-session identifier and a `DETECTED`, `TRACKED`, `TEMPORARILY_LOST`, or `ENDED` lifecycle. Track identifiers are not employee identities; identity is not inferred or attached.
 
-The authenticated `/api/v1/system/health` and `/api/v1/system/ai-health` endpoints expose derived subsystem states. `/api/v1/system/pipelines` exposes per-camera pipeline status. `/api/v1/events` reads persisted event records; `/api/v1/events/{event_id}/transitions` enforces allowed workflow transitions and records transition history. Evidence capture and notification queuing are available only for persisted events and are not connected to detection because no safety event-generation engine is implemented. No PPE model, proximity, fall, or fire detector is connected.
+`/api/v1/system/health`, `/api/v1/system/ai-health`, and `/api/v1/system/pipelines` expose derived subsystem states. `/api/v1/events` reads persisted event records; workflow/acknowledgement APIs validate transitions and record history. The inference pipeline calls the safety orchestrator only after real model inference. Fire/smoke class presence and restricted-zone assessment are implemented conditionally on compatible classes, configured detector policy, and authorized zone geometry. PPE absence, proximity, fall, leakage, and unsafe-behavior detectors are not implemented. No such safety inference is currently available because model weights are absent.
 
-Standalone `TemporalVerifier`, polygon membership, and PPE rule interpretation primitives are present. They require explicitly supplied rules/observations and do not generate events. Generic temporal values must be marked `ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION`; no IGL SOP thresholds or zone geometry are present.
+## Automated Event Source
+
+Camera-health monitoring can write `CAMERA_FAILURE` events with `observation_state=NOT_ASSESSABLE`, no confidence, and no duration; these report source availability, not a safety hazard. When an implemented detector has real model output and operator-supplied configuration, `SafetyEventOrchestrator` applies temporal policy, persists event provenance, captures evidence from the same frame, correlates persisted events, and evaluates notification/escalation policy. No safety event is produced by configuration alone.
+
+Detections and visual tracks are persisted by the orchestrator with model and frame provenance when real inference runs. Incidents, near-misses, and corrective actions refer to persisted events and move only through declared, audited state machines. This build has no authentication, so actor attribution is explicitly NULL.
+
+Temporal verification and polygon membership are connected to the supported safety evaluation path. PPE rule interpretation remains a separate primitive because PPE detectors are not implemented. Generic temporal values must be marked `ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION`; no IGL SOP thresholds or zone geometry are present.
 
 ## Health Semantics
 
@@ -37,12 +43,12 @@ suite never depends on a deployment's data.
 
 ## Configuration and Validation Boundaries
 
-- **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association, camera-to-pipeline wiring, continuous camera-health worker, auditable event state transition service, one-time administrator bootstrap, migration-owned schema, and derived health semantics.
-- **PARTIALLY IMPLEMENTED:** Temporal verification, zone geometry assessment, and PPE rule evaluation as independent non-event-generating primitives.
-- **PARTIALLY IMPLEMENTED:** Operator-supplied configuration APIs/templates, event-linked evidence storage, in-app notification queue, DB count analytics, and HTML/CSS/JS views. The UI has no live video feed and is not a complete operations console.
-- **PARTIALLY IMPLEMENTED:** File and RTSP acquisition code. No actual video source was available for end-to-end verification.
+- **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association and persistence, camera-to-pipeline wiring, continuous camera-health worker, audited event transitions, response lifecycles, migration-owned schema, and derived health semantics. Authentication/bootstrap are not implemented.
+- **PARTIALLY IMPLEMENTED:** Supported fire/smoke/restricted-zone event path is code-connected but blocked at runtime by missing weights and IGL configuration; other listed detector categories remain unavailable.
+- **PARTIALLY IMPLEMENTED:** Operator-supplied configuration APIs, event-linked evidence, in-app queue, DB-count analytics, browser dashboard and event-driven local alarm. External sender delivery and authentication are absent.
+- **REAL-INPUT CHECK:** Laptop webcam device 0 was opened through the backend; actual 640x480 frames were displayed from MJPEG in the browser. This is camera acquisition validation only.
 - **NOT_CONFIGURED:** Model weights are absent; model health reports `MODEL_NOT_CONFIGURED`.
 - **NOT_VALIDATED:** No IGL layouts, cameras, SOPs, or labeled IGL data were supplied or assessed.
-- **BLOCKED_BY_REAL_INPUT:** Detection accuracy, tracking accuracy, sustained real-time performance, and IGL validation all require authorized real input that is absent from this workspace.
+- **BLOCKED_BY_REAL_INPUT:** Model inference and detector validation require an authorized compatible model checkpoint. IGL validation additionally requires authorized plant layout/SOP data and labeled IGL footage.
 
 The system is advisory only. No safety instrumented or operational control systems are called.

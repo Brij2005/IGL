@@ -4,30 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>IGL Safety Intelligence</title>
-  <link rel="stylesheet" href="css/styles.css">
-  <script src="js/app.js" defer></script>
+  <link rel="stylesheet" href="css/styles.css?v=platform-audit-3">
+  <script src="js/app.js?v=platform-audit-3" defer></script>
 </head>
 <body>
-  <div id="login-screen" class="login-shell">
-    <form id="login-form" class="login-panel">
-      <div class="brand-mark" aria-hidden="true">IGL<span>/</span>SI</div>
-      <p class="eyebrow">INDUSTRIAL SAFETY INTELLIGENCE</p>
-      <h1>Sign in</h1>
-      <label>API base URL
-        <input id="api-base" type="url" value="http://localhost:8000/api/v1" autocomplete="url" required>
-      </label>
-      <label>Username
-        <input id="username" autocomplete="username" required>
-      </label>
-      <label>Password
-        <input id="password" type="password" autocomplete="current-password" required>
-      </label>
-      <button type="submit" class="button-primary">Sign in <span aria-hidden="true">-&gt;</span></button>
-      <p id="login-error" class="form-error" role="alert"></p>
-    </form>
-    <p class="login-footnote">IGL-targeted platform · validation status is reported by the connected API</p>
-  </div>
-
+  <!-- No login screen: this deployment has no authentication, so there is
+       nothing to sign in to. Restrict access at the network layer instead. -->
   <div id="app-shell" class="app-shell" hidden>
     <aside class="sidebar">
       <a class="brand" href="#overview" aria-label="IGL Safety Intelligence home">
@@ -47,7 +29,7 @@
       </nav>
       <div class="sidebar-bottom">
         <div class="igltarget"><span class="status-dot dot-amber"></span><span>IGL VALIDATION<br><strong>NOT VALIDATED</strong></span></div>
-        <button id="logout-button" class="nav-item logout"><span class="nav-symbol">&gt;</span>Sign out</button>
+        <div class="nav-item static-note"><span class="nav-symbol">!</span>NO AUTHENTICATION<br><strong>RESTRICT AT NETWORK</strong></div>
       </div>
     </aside>
 
@@ -58,12 +40,15 @@
           <h1 id="view-title">Overview</h1>
         </div>
         <div class="topbar-right">
+          <label class="api-field" for="api-base">API base
+            <input id="api-base" type="url" value="http://localhost:8000/api/v1" autocomplete="url">
+          </label>
           <span class="api-state"><span class="status-dot dot-muted" id="api-dot"></span><span id="api-state-text">Checking API</span></span>
-          <span class="user-chip" id="user-chip">Authenticated</span>
           <button class="icon-button" id="refresh-button" title="Refresh data" aria-label="Refresh data">R</button>
         </div>
       </header>
       <div id="global-message" class="global-message" role="status" hidden></div>
+      <div id="alarm-region" class="alarm-region" role="status" aria-live="assertive" aria-atomic="true"></div>
       <section id="view-content" class="view-content" aria-live="polite"></section>
       <footer class="page-footer">
         <span>Decision support only · no plant controls</span>

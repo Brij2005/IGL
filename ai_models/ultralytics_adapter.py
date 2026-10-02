@@ -1,6 +1,7 @@
 """Explicitly configured Ultralytics adapter; never downloads model weights."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -12,6 +13,33 @@ from ai_models.detection import Detection
 
 
 logger = logging.getLogger("igl.ai.model")
+
+
+def weights_checksum(path: Path | str | None) -> str | None:
+    """Return the SHA-256 of the configured weights file, or None.
+
+    A model name, version string, and file name cannot prove which bytes were
+    evaluated. The checksum is computed from the actual file, so a report can
+    be tied to the exact artifact that produced it. Anything that is not a
+    readable local path yields None rather than a fabricated digest.
+    """
+    if not isinstance(path, (str, Path)):
+        return None
+    candidate = Path(path).expanduser()
+    if not candidate.is_file():
+        return None
+    digest = hashlib.sha256()
+    try:
+        with candidate.open("rb") as weights_file:
+            for chunk in iter(lambda: weights_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        logger.error(
+            "Weights checksum failed",
+            extra={"component": "model_adapter", "error_type": type(exc).__name__},
+        )
+        return None
+    return digest.hexdigest()
 
 
 class UltralyticsModelAdapter:
@@ -26,13 +54,15 @@ class UltralyticsModelAdapter:
         if not 0.0 <= confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between 0 and 1")
         self.weights_path = Path(weights_path).expanduser() if weights_path else None
-        self.model_name = model_name or (self.weights_path.stem if self.weights_path else "UNCONFIGURED")
+        self.model_name = model_name.strip() if model_name and model_name.strip() else "UNCONFIGURED"
         self.model_version = model_version or "UNSPECIFIED"
         self.confidence_threshold = confidence_threshold
         self.device = device
         self.classes: tuple[str, ...] = ()
         self.inference_latency_ms: float | None = None
         self.inference_count = 0
+        self.inference_attempt_count = 0
+        self.inference_failure_count = 0
         self._latency_total_ms = 0.0
         self.status = "MODEL_NOT_CONFIGURED" if self.weights_path is None else "NOT_LOADED"
         self._model: Any = None
@@ -54,6 +84,9 @@ class UltralyticsModelAdapter:
                     return False
         except OSError:
             self.status = "MODEL_INVALID_WEIGHTS"
+            return False
+        if self.model_name == "UNCONFIGURED":
+            self.status = "MODEL_NAME_REQUIRED"
             return False
         if self.model_version == "UNSPECIFIED":
             self.status = "MODEL_VERSION_REQUIRED"
@@ -78,6 +111,7 @@ class UltralyticsModelAdapter:
         if not isinstance(frame, np.ndarray) or frame.size == 0:
             raise ValueError("Cannot run inference on an empty frame")
         started = time.perf_counter()
+        self.inference_attempt_count += 1
         try:
             results = self._model.predict(frame, conf=self.confidence_threshold, device=self.device, verbose=False)
             detections: list[Detection] = []
@@ -100,28 +134,34 @@ class UltralyticsModelAdapter:
                         model_name=self.model_name,
                         model_version=self.model_version,
                     ))
+            self.inference_count += 1
             return detections
         except Exception as exc:
+            self.inference_failure_count += 1
             self.status = "INFERENCE_ERROR"
             logger.error("Inference failed", extra={"component": "model_adapter", "camera_id": camera_id, "error_type": type(exc).__name__})
             raise RuntimeError("Model inference failed") from exc
         finally:
             self.inference_latency_ms = round((time.perf_counter() - started) * 1000, 3)
             self._latency_total_ms += self.inference_latency_ms
-            self.inference_count += 1
 
     def health(self) -> dict[str, Any]:
+        weights_loaded = self._model is not None
         return {
             "status": self.status,
-            "available": self._model is not None,
+            "available": weights_loaded,
+            "weights_loaded": weights_loaded,
             "model_name": self.model_name,
             "model_version": self.model_version,
+            "weights_checksum_sha256": weights_checksum(self.weights_path),
             "classes": list(self.classes),
             "confidence_threshold": self.confidence_threshold,
             "device": self.device,
             "inference_latency_ms": self.inference_latency_ms,
-            "average_inference_latency_ms": round(self._latency_total_ms / self.inference_count, 3) if self.inference_count else None,
+            "average_inference_latency_ms": round(self._latency_total_ms / self.inference_attempt_count, 3) if self.inference_attempt_count else None,
             "inference_count": self.inference_count,
+            "inference_attempt_count": self.inference_attempt_count,
+            "inference_failure_count": self.inference_failure_count,
         }
 
     def metadata(self) -> dict[str, Any]:

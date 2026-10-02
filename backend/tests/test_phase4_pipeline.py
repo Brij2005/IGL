@@ -51,10 +51,32 @@ def test_pipeline_rejects_empty_frame_and_reports_failure():
     assert state["inference_failures"] == 1
 
 
-def test_inference_health_endpoints_reject_unauthenticated_requests():
+def test_inference_health_endpoints_are_read_only_and_always_open():
+    """These read-only endpoints use the monitoring path, not the write path.
+
+    They depend on ``resolve_actor`` rather than ``require_permission``, so they
+    stay reachable regardless of the anonymous-access mode. That is intentional:
+    monitoring and health reporting must keep working when operator writes are
+    closed. They report derived state and mutate nothing.
+    """
     with TestClient(app) as client:
-        assert client.get("/api/v1/system/ai-health").status_code in (401, 403)
-        assert client.get("/api/v1/system/pipelines").status_code in (401, 403)
+        ai_health = client.get("/api/v1/system/ai-health")
+        assert ai_health.status_code == 200
+        body = ai_health.json()
+        # IGL validation is never claimed, whatever the model state is.
+        assert body["igl_validation_status"] == "NOT_VALIDATED"
+        # An unconfigured model is reported as unconfigured, never as healthy.
+        assert body["model"]["available"] is False
+        assert body["model"]["status"] != "READY"
+        assert client.get("/api/v1/system/pipelines").status_code == 200
+
+
+def test_inference_health_endpoints_report_model_not_configured_truthfully():
+    with TestClient(app) as client:
+        model = client.get("/api/v1/system/ai-health").json()["model"]
+    # Without weights the platform says so instead of reporting a fake ready state.
+    assert model["weights_loaded"] is False
+    assert model["status"] in ("MODEL_NOT_CONFIGURED", "MODEL_WEIGHTS_NOT_FOUND", "NOT_LOADED")
 
 
 def test_root_health_does_not_claim_online_when_model_is_unconfigured():

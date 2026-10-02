@@ -15,9 +15,9 @@ from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.auth import create_access_token, hash_password
+
 from app.database import Base, get_db
-from app.main import app, seed_default_roles
+from app.main import app, seed_reference_roles
 from app.models import (
     Acknowledgement,
     Assignment,
@@ -31,18 +31,18 @@ from app.models import (
     NearMiss,
     NearMissStateTransition,
     Role,
-    User,
+    User
 )
 from app.services.response_engine import (
     InvalidStateTransition,
     transition_corrective_action,
     transition_incident,
-    transition_near_miss,
+    transition_near_miss
 )
 from app.services.workflow_engine import (
     WorkflowPreconditionError,
     acknowledge_event,
-    assign_event,
+    assign_event
 )
 from fastapi.testclient import TestClient
 
@@ -66,7 +66,7 @@ def create_event(db, workflow_state="NEW"):
     camera = Camera(
         name="fixture camera",
         code=f"FIX-CAM-{next(_CAMERA_SEQUENCE):04d}",
-        stream_url="test-only-source",
+        stream_url="test-only-source"
     )
     db.add(camera)
     db.flush()
@@ -82,8 +82,7 @@ def create_user(db, username="response_test_admin", role_name="ADMIN"):
         username=username,
         email=f"{username}@example.test",
         full_name=username.replace("_", " ").title(),
-        hashed_password=hash_password("test-only-password"),
-        role_id=role.id,
+        role_id=role.id
     )
     db.add(user)
     db.commit()
@@ -97,7 +96,7 @@ def create_incident(db, event=None):
         title="Fixture incident",
         description="Raised by the test suite",
         severity="HIGH",
-        status="OPEN",
+        status="OPEN"
     )
     db.add(incident)
     db.commit()
@@ -111,7 +110,7 @@ def create_near_miss(db, event=None):
         title="Fixture near miss",
         description="Raised by the test suite",
         potential_severity="HIGH",
-        status="REPORTED",
+        status="REPORTED"
     )
     db.add(near_miss)
     db.commit()
@@ -123,7 +122,7 @@ def create_action(db, incident=None):
     action = CorrectiveAction(
         incident_id=incident.id,
         action_description="Fixture corrective action",
-        status="PENDING",
+        status="PENDING"
     )
     db.add(action)
     db.commit()
@@ -224,31 +223,31 @@ def test_corrective_action_rejects_skipping_in_progress(db_session):
 # ---------------------------------------------------------------------------
 
 def test_acknowledgement_requires_awaiting_state_and_advances_workflow(db_session):
-    seed_default_roles(db_session)
+    seed_reference_roles(db_session)
     user = create_user(db_session)
     event = create_event(db_session, workflow_state="UNACKNOWLEDGED")
-    acknowledgement = acknowledge_event(db_session, event, user=user, notes="fixture acknowledgement")
+    acknowledgement = acknowledge_event(db_session, event, actor_id=user.id, notes="fixture acknowledgement")
 
     assert acknowledgement.user_id == user.id
     assert event.workflow_state == "ACKNOWLEDGED"
     assert db_session.query(Acknowledgement).filter_by(event_id=event.id).count() == 1
 
     with pytest.raises(WorkflowPreconditionError, match="cannot be acknowledged"):
-        acknowledge_event(db_session, event, user=user, notes="second acknowledgement")
+        acknowledge_event(db_session, event, actor_id=user.id, notes="second acknowledgement")
     assert db_session.query(Acknowledgement).filter_by(event_id=event.id).count() == 1
 
 
 def test_acknowledgement_rejects_an_already_investigating_event(db_session):
-    seed_default_roles(db_session)
+    seed_reference_roles(db_session)
     user = create_user(db_session)
     event = create_event(db_session, workflow_state="UNDER_INVESTIGATION")
     with pytest.raises(WorkflowPreconditionError, match="cannot be acknowledged"):
-        acknowledge_event(db_session, event, user=user)
+        acknowledge_event(db_session, event, actor_id=user.id)
     assert db_session.query(Acknowledgement).count() == 0
 
 
 def test_assignment_requires_acknowledgement_and_an_active_assignee(db_session):
-    seed_default_roles(db_session)
+    seed_reference_roles(db_session)
     officer = create_user(db_session, "response_test_officer", "SAFETY_OFFICER")
     inactive = create_user(db_session, "response_test_inactive", "OPERATOR")
     inactive.is_active = False
@@ -260,7 +259,7 @@ def test_assignment_requires_acknowledgement_and_an_active_assignee(db_session):
 
     event.workflow_state = "ACKNOWLEDGED"
     db_session.commit()
-    with pytest.raises(WorkflowPreconditionError, match="inactive user"):
+    with pytest.raises(WorkflowPreconditionError, match="inactive identity"):
         assign_event(db_session, event, assignee=inactive, assigner=officer)
     assert db_session.query(Assignment).count() == 0
 
@@ -276,18 +275,129 @@ def test_assignment_requires_acknowledgement_and_an_active_assignee(db_session):
 
 @pytest.fixture
 def client(db_session):
-    seed_default_roles(db_session)
-    admin = create_user(db_session)
-    token = create_access_token({"sub": admin.username, "user_id": admin.id, "role": "ADMIN"})
+    seed_reference_roles(db_session)
+    # The admin identity is created because audit rows and assignment resolve
+    # named identities. No token is issued: this build has no authentication.
+    create_user(db_session)
 
     def override_db():
         yield db_session
 
     app.dependency_overrides[get_db] = override_db
     with TestClient(app) as test_client:
-        test_client.headers.update({"Authorization": f"Bearer {token}"})
         yield test_client
     app.dependency_overrides.clear()
+
+
+def _client_as(db_session, username, role_name):
+    """Build a client bound to a database, with a named identity seeded.
+
+    No token is issued: this build has no authentication, so the identity cannot
+    be proven to the API. The identity is still created because role-permission
+    declarations and assignment targets resolve named identities.
+    """
+    user = create_user(db_session, username, role_name)
+
+    def override_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_db
+    client = TestClient(app)
+    return client, user
+
+
+def test_declared_permissions_exist_but_are_not_enforced(db_session):
+    """Records the current access model of this build.
+
+    The seeded permission set still exists on every role, so the intended access
+    model is visible in data and in code. It is not enforced at request time,
+    because nothing authenticates a request and therefore no identity can be
+    checked against it. This build is only defensible behind a network boundary
+    or an authenticating reverse proxy.
+    """
+    seed_reference_roles(db_session)
+    event = create_event(db_session, workflow_state="UNACKNOWLEDGED")
+
+    operator_client, operator = _client_as(db_session, "perm_operator", "OPERATOR")
+    with operator_client:
+        acknowledged = operator_client.post(
+            f"/api/v1/events/{event.id}/acknowledgements",
+            json={"notes": "operator acknowledgement permitted by events:acknowledge"}
+        )
+        assert acknowledged.status_code == 201
+        # The actor is unattributed, because no request proved an identity.
+        assert acknowledged.json()["user_id"] is None
+    assert operator.role.permissions_json and "events:acknowledge" in operator.role.permissions_json
+    assert event.workflow_state == "ACKNOWLEDGED"
+
+    # A PLANT_MANAGER is not granted incidents:manage in the seeded role, yet
+    # the write still succeeds because the requirement cannot be evaluated.
+    manager_client, manager = _client_as(db_session, "perm_manager", "PLANT_MANAGER")
+    with manager_client:
+        created = manager_client.post(
+            "/api/v1/incidents",
+            json={"event_id": event.id, "title": "Manager is not granted incidents:manage"}
+        )
+        assert created.status_code == 201
+    assert "incidents:manage" not in (manager.role.permissions_json or [])
+
+
+def test_declared_permissions_are_closed_when_anonymous_access_is_disabled(db_session, monkeypatch):
+    """With anonymous access off, the same writes are refused rather than faked."""
+    from app.config import settings
+
+    seed_reference_roles(db_session)
+    event = create_event(db_session, workflow_state="UNACKNOWLEDGED")
+    manager_client, _manager = _client_as(db_session, "closed_manager", "PLANT_MANAGER")
+    with manager_client:
+        monkeypatch.setattr(settings, "ALLOW_ANONYMOUS_ACCESS", False)
+        try:
+            refused = manager_client.post(
+                "/api/v1/incidents",
+                json={"event_id": event.id, "title": "Should be refused"}
+            )
+            assert refused.status_code == 401
+            assert "Unmet requirement" in refused.json()["detail"]
+        finally:
+            monkeypatch.setattr(settings, "ALLOW_ANONYMOUS_ACCESS", True)
+        # Health stays reachable so monitoring still works when writes are closed.
+        assert manager_client.get("/api/v1/system/health").status_code == 200
+    assert db_session.query(Incident).count() == 0
+
+
+def test_corrective_action_writes_declare_their_own_requirement(db_session):
+    """The endpoint declares corrective-actions:write; nothing can check it yet.
+
+    This build has no authentication, so the requirement cannot be evaluated
+    against an identity. The declaration stays visible and the write is refused
+    outright only when anonymous access is disabled.
+    """
+    seed_reference_roles(db_session)
+    incident = create_incident(db_session)
+    manager_client, _ = _client_as(db_session, "perm_action_manager", "PLANT_MANAGER")
+    with manager_client:
+        response = manager_client.post(
+            "/api/v1/corrective-actions",
+            json={"action_description": "Manager attempt", "incident_id": incident.id}
+        )
+        assert response.status_code == 201
+    assert db_session.query(CorrectiveAction).count() == 1
+
+    from app.config import settings
+
+    with manager_client:
+        original = settings.ALLOW_ANONYMOUS_ACCESS
+        settings.ALLOW_ANONYMOUS_ACCESS = False
+        try:
+            refused = manager_client.post(
+                "/api/v1/corrective-actions",
+                json={"action_description": "Refused attempt", "incident_id": incident.id}
+            )
+            assert refused.status_code == 401
+            assert "corrective_actions:manage" in refused.json()["detail"]
+        finally:
+            settings.ALLOW_ANONYMOUS_ACCESS = original
+    assert db_session.query(CorrectiveAction).count() == 1
 
 
 def test_lifecycle_states_are_published(client):
@@ -306,14 +416,14 @@ def test_lifecycle_states_are_published(client):
 def test_incident_api_requires_an_existing_event(client, db_session):
     orphan = client.post(
         "/api/v1/incidents",
-        json={"event_id": "00000000-0000-0000-0000-000000000000", "title": "Orphan incident"},
+        json={"event_id": "00000000-0000-0000-0000-000000000000", "title": "Orphan incident"}
     )
     assert orphan.status_code == 404
 
     event = create_event(db_session)
     created = client.post(
         "/api/v1/incidents",
-        json={"event_id": event.id, "title": "Operator raised incident", "severity": "CRITICAL"},
+        json={"event_id": event.id, "title": "Operator raised incident", "severity": "CRITICAL"}
     )
     assert created.status_code == 201
     body = created.json()
@@ -322,7 +432,7 @@ def test_incident_api_requires_an_existing_event(client, db_session):
 
     moved = client.post(
         f"/api/v1/incidents/{body['id']}/transitions",
-        json={"new_state": "RESOLVED", "reason": "fixture resolved by operator"},
+        json={"new_state": "RESOLVED", "reason": "fixture resolved by operator"}
     )
     assert moved.status_code == 200
     assert moved.json()["status"] == "RESOLVED"
@@ -331,14 +441,20 @@ def test_incident_api_requires_an_existing_event(client, db_session):
     assert history.status_code == 200
     assert history.json()[0]["previous_state"] == "OPEN"
     audit = db_session.query(AuditLog).filter_by(action="INCIDENT_TRANSITIONED").one()
-    assert audit.details_json == {"previous_state": "OPEN", "new_state": "RESOLVED"}
+    # The audit row also records the access model that produced it, because no
+    # request in this build proves an identity.
+    assert audit.details_json == {
+        "previous_state": "OPEN",
+        "new_state": "RESOLVED",
+        "access_state": "NO_AUTHENTICATION_ANONYMOUS_ACCESS",
+    }
 
 
 def test_api_transition_requires_a_reason(client, db_session):
     incident = create_incident(db_session)
     response = client.post(
         f"/api/v1/incidents/{incident.id}/transitions",
-        json={"new_state": "INVESTIGATING"},
+        json={"new_state": "INVESTIGATING"}
     )
     assert response.status_code == 422
     assert incident.status == "OPEN"
@@ -348,7 +464,7 @@ def test_api_transition_rejects_an_illegal_jump_with_conflict(client, db_session
     incident = create_incident(db_session)
     response = client.post(
         f"/api/v1/incidents/{incident.id}/transitions",
-        json={"new_state": "CLOSED", "reason": "fixture illegal jump"},
+        json={"new_state": "CLOSED", "reason": "fixture illegal jump"}
     )
     assert response.status_code == 409
     assert incident.status == "OPEN"
@@ -358,7 +474,7 @@ def test_corrective_action_requires_exactly_one_existing_parent(client, db_sessi
     event = create_event(db_session)
     neither = client.post(
         "/api/v1/corrective-actions",
-        json={"action_description": "Fixture action with no parent"},
+        json={"action_description": "Fixture action with no parent"}
     )
     assert neither.status_code == 422
 
@@ -368,7 +484,7 @@ def test_corrective_action_requires_exactly_one_existing_parent(client, db_sessi
             "action_description": "Fixture action with two parents",
             "event_id": event.id,
             "incident_id": create_incident(db_session).id,
-        },
+        }
     )
     assert both.status_code == 422
 
@@ -377,13 +493,13 @@ def test_corrective_action_requires_exactly_one_existing_parent(client, db_sessi
         json={
             "action_description": "Fixture action with a missing parent",
             "near_miss_id": "00000000-0000-0000-0000-000000000000",
-        },
+        }
     )
     assert missing_parent.status_code == 404
 
     accepted = client.post(
         "/api/v1/corrective-actions",
-        json={"action_description": "Fixture action against the event", "event_id": event.id},
+        json={"action_description": "Fixture action against the event", "event_id": event.id}
     )
     assert accepted.status_code == 201
     assert accepted.json()["status"] == "PENDING"
@@ -395,7 +511,7 @@ def test_response_listings_are_paginated_and_filtered(client, db_session):
     for index in range(3):
         client.post(
             "/api/v1/near-misses",
-            json={"event_id": event.id, "title": f"Fixture near miss {index}"},
+            json={"event_id": event.id, "title": f"Fixture near miss {index}"}
         )
     page = client.get("/api/v1/near-misses", params={"limit": 2, "offset": 0})
     assert page.status_code == 200
@@ -412,7 +528,7 @@ def test_acknowledgement_endpoint_records_audit_and_rejects_repeat(client, db_se
     event = create_event(db_session, workflow_state="UNACKNOWLEDGED")
     first = client.post(
         f"/api/v1/events/{event.id}/acknowledgements",
-        json={"notes": "fixture acknowledgement via API"},
+        json={"notes": "fixture acknowledgement via API"}
     )
     assert first.status_code == 201
     assert first.json()["event_id"] == event.id
@@ -431,7 +547,7 @@ def test_assignment_endpoint_records_audit_and_named_assignee(client, db_session
     event = create_event(db_session, workflow_state="ACKNOWLEDGED")
     response = client.post(
         f"/api/v1/events/{event.id}/assignments",
-        json={"assigned_to_user_id": assignee.id, "notes": "fixture assignment"},
+        json={"assigned_to_user_id": assignee.id, "notes": "fixture assignment"}
     )
     assert response.status_code == 201
     assert response.json()["assigned_to_user_id"] == assignee.id
@@ -439,9 +555,10 @@ def test_assignment_endpoint_records_audit_and_named_assignee(client, db_session
 
     missing = client.post(
         f"/api/v1/events/{event.id}/assignments",
-        json={"assigned_to_user_id": "00000000-0000-0000-0000-000000000000"},
+        json={"assigned_to_user_id": "00000000-0000-0000-0000-000000000000"}
     )
     assert missing.status_code == 404
 
     audit = db_session.query(AuditLog).filter_by(action="EVENT_ASSIGNED").one()
     assert audit.details_json["assigned_to_user_id"] == assignee.id
+

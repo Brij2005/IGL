@@ -34,19 +34,43 @@ class AnalyticsSummaryOut(BaseModel):
 class NotificationOut(BaseModel):
     id: str
     event_id: Optional[str] = None
-    user_id: str
+    user_id: Optional[str] = None
+    recipient_role: Optional[str] = None
     channel: str
     recipient: Optional[str] = None
     status: str
     error_message: Optional[str] = None
     created_at: datetime
+    retry_count: int = 0
+    max_attempts: int = 0
+    sent_at: Optional[datetime] = None
+    last_attempt_at: Optional[datetime] = None
+    next_attempt_at: Optional[datetime] = None
+    provider: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationChannelStatusOut(BaseModel):
+    """Per-channel delivery state.
+
+    ``configuration_state`` is NOT_CONFIGURED whenever this build has no
+    transport for the channel, so a queue depth can never be mistaken for
+    evidence that an alert was delivered.
+    """
+    channel: str
+    configuration_state: str
+    queued: int = 0
+    sent: int = 0
+    failed: int = 0
+    not_configured: int = 0
 
 
 class ModelHealthOut(BaseModel):
     status: str
     available: bool
+    weights_loaded: bool = False
+    weights_checksum_sha256: Optional[str] = None
     model_name: str
     model_version: str
     classes: list[str] = Field(default_factory=list)
@@ -55,6 +79,8 @@ class ModelHealthOut(BaseModel):
     inference_latency_ms: Optional[float] = None
     average_inference_latency_ms: Optional[float] = None
     inference_count: int
+    inference_attempt_count: int = 0
+    inference_failure_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -54,6 +54,8 @@ class CameraUpdate(BaseModel):
 
 
 class CameraHealthOut(BaseModel):
+    """Persisted camera-health row as written by the health worker."""
+
     id: str
     camera_id: str
     status: str
@@ -64,11 +66,43 @@ class CameraHealthOut(BaseModel):
     dropped_frames: Optional[int] = None
     brightness_score: Optional[float] = None
     sharpness_score: Optional[float] = None
+    image_quality_score: Optional[float] = None
+    is_black: Optional[bool] = None
+    is_frozen: Optional[bool] = None
     inference_status: str
     health_timestamp: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CameraHealthSnapshotOut(BaseModel):
+    """Read-only health view.
+
+    A field is a recorded observation, an explicit "not observed" state, or
+    null. Nothing here is computed on the read path, so a snapshot can never
+    report a status that was not actually observed.
+    """
+
+    camera_id: str
+    status: str
+    inference_status: str
+    observation_source: str
+    observation_stale: bool = False
+    is_active: bool = True
+    reader_status: str = "NOT_STARTED"
+    pipeline_states: list[dict] = Field(default_factory=list)
+    health_timestamp: Optional[datetime] = None
+    last_frame_timestamp: Optional[datetime] = None
+    measured_fps: Optional[float] = None
+    frame_latency_ms: Optional[float] = None
+    observed_resolution: Optional[str] = None
+    dropped_frames: Optional[int] = None
+    brightness_score: Optional[float] = None
+    sharpness_score: Optional[float] = None
+    image_quality_score: Optional[float] = None
+    is_black: Optional[bool] = None
+    is_frozen: Optional[bool] = None
 
 
 class CameraOut(CameraBase):

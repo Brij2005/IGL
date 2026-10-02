@@ -29,6 +29,7 @@ try:
     from app.api import api_router
     from app.services.inference_pipeline import pipeline_manager
     from app.services.continuous_health import camera_health_worker
+    from app.services.safety_event_worker import safety_event_worker
     from app.services.system_health import collect_system_health
 except ImportError:
     from backend.app.config import settings
@@ -37,9 +38,15 @@ except ImportError:
     from backend.app.api import api_router
     from backend.app.services.inference_pipeline import pipeline_manager
     from backend.app.services.continuous_health import camera_health_worker
+    from backend.app.services.safety_event_worker import safety_event_worker
     from backend.app.services.system_health import collect_system_health
 
 
+# Reference roles. These are responsibility labels, not credentials: nothing
+# authenticates against them in this build. They are still needed because an
+# incident reporter, an assignee and a notification audience are all named by
+# role, and because escalation and notification policies validate their target
+# role against this list.
 DEFAULT_ROLES = [
     {
         "name": "ADMIN",
@@ -51,28 +58,42 @@ DEFAULT_ROLES = [
         "description": "Safety officer managing events, incidents and corrective actions",
         "permissions_json": [
             "events:view", "events:acknowledge", "events:assign",
-            "incidents:manage", "corrective_actions:manage", "analytics:view",
-            "plants:view", "zones:view"
+            "incidents:manage", "incidents:view",
+            "near_misses:view",
+            "corrective_actions:manage", "corrective_actions:view",
+            "analytics:view", "plants:view", "zones:view",
+            "cameras:view", "evidence:view"
         ]
     },
     {
         "name": "PLANT_MANAGER",
         "description": "Plant manager overseeing operations, analytics and audit logs",
         "permissions_json": [
-            "plants:view", "zones:view", "events:view",
-            "incidents:view", "corrective_actions:view", "analytics:view", "audit_logs:view"
+            "plants:view", "zones:view", "cameras:view",
+            "events:view", "incidents:view", "near_misses:view",
+            "corrective_actions:view", "analytics:view", "audit_logs:view",
+            "evidence:view"
         ]
     },
     {
         "name": "OPERATOR",
         "description": "Plant floor operator monitoring live feeds and acknowledging alerts",
-        "permissions_json": ["events:view", "events:acknowledge", "cameras:view_live"]
+        "permissions_json": [
+            "cameras:view", "cameras:view_live",
+            "events:view", "events:acknowledge",
+            "zones:view", "evidence:view"
+        ]
     }
 ]
 
 
-def seed_default_roles(db: Session):
-    """Seed baseline RBAC roles if not present in the database."""
+def seed_reference_roles(db: Session):
+    """Seed the reference role records if they are missing. Idempotent.
+
+    This is configuration data, not account creation: it creates no user, stores
+    no credential and asks for no input.
+    """
+    added_role = False
     for role_data in DEFAULT_ROLES:
         existing = db.query(Role).filter(Role.name == role_data["name"]).first()
         if not existing:
@@ -82,25 +103,34 @@ def seed_default_roles(db: Session):
                 permissions_json=role_data["permissions_json"]
             )
             db.add(new_role)
-        else:
-            existing.description = role_data["description"]
-            existing.permissions_json = role_data["permissions_json"]
-    db.commit()
+            added_role = True
+    if added_role:
+        db.commit()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown events management."""
+    """Startup and shutdown events management.
+
+    Nothing here asks for a username or password, and no administrator account is
+    created: this build has no authentication. Startup only verifies that the
+    database is at migration head, prepares the configured model if one exists,
+    and seeds the reference role records used to resolve responsibility.
+    """
     require_database_at_migration_head()
     pipeline_manager.prepare_model()
     db = SessionLocal()
     try:
-        seed_default_roles(db)
+        seed_reference_roles(db)
     finally:
         db.close()
     camera_health_worker.start()
+    # Escalation evaluation is off unless an operator enables it; the worker
+    # reports NOT_CONFIGURED in that case rather than silently doing nothing.
+    safety_event_worker.start()
     yield
     # Shutdown
+    safety_event_worker.stop()
     camera_health_worker.stop()
     pipeline_manager.stop_all()
     engine.dispose()
@@ -157,6 +187,8 @@ def root():
         "camera_state": system_health["camera_state"],
         "camera_health_worker": system_health["camera_health_worker"],
         "inference_pipeline": system_health["inference_pipeline"],
+        "access_control": system_health["access_control"],
+        "authentication": "NOT_IMPLEMENTED",
         "validation_status": system_health["validation_status"],
         "igl_validated": system_health["igl_validated"],
         "igl_configuration_status": system_health["igl_configuration_status"],

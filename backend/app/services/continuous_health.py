@@ -12,12 +12,16 @@ try:
     from app.models import Camera
     from app.services.health_monitor import health_monitor
     from app.services.inference_pipeline import pipeline_manager
+    from app.services.video_ingestion import ingestion_manager
+    from app.services.webcam_source import is_webcam_source
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import SessionLocal
     from backend.app.models import Camera
     from backend.app.services.health_monitor import health_monitor
     from backend.app.services.inference_pipeline import pipeline_manager
+    from backend.app.services.video_ingestion import ingestion_manager
+    from backend.app.services.webcam_source import is_webcam_source
 
 
 logger = logging.getLogger("igl.camera.health_worker")
@@ -57,6 +61,11 @@ class ContinuousCameraHealthWorker:
             cameras = session.query(Camera).filter(Camera.is_active.is_(True)).all()
             for camera in cameras:
                 try:
+                    reader = ingestion_manager.get_reader(camera.id)
+                    webcam_not_started = is_webcam_source(camera.stream_url) and reader is None
+                    if pipeline_manager.is_operator_stopped(camera.id) or webcam_not_started:
+                        health_monitor.evaluate_camera_health(session, camera, dispatch_events=False)
+                        continue
                     pipeline_manager.start_stream(camera.id, camera.stream_url, camera.fps)
                     health_monitor.evaluate_camera_health(session, camera)
                     self.last_error_type = None

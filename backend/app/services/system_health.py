@@ -123,6 +123,10 @@ def collect_system_health() -> dict:
         "active_pipelines": len(pipelines),
         "evidence_subsystem": evidence_state,
         "notification_subsystem": "IN_APP_QUEUE_AVAILABLE_EXTERNAL_NOT_CONFIGURED",
+        # Reported plainly: this build has no authentication, so every endpoint
+        # is reachable without a credential unless access is restricted at the
+        # network layer.
+        "access_control": settings.authentication_state(),
         "frontend_connectivity": "NOT_ASSESSED",
         "validation_status": VALIDATION_NOT_VALIDATED,
         "igl_validated": False,

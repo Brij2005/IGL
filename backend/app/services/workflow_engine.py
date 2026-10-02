@@ -87,7 +87,7 @@ def acknowledge_event(
     db: Session,
     event: Event,
     *,
-    user: User,
+    actor_id: str | None = None,
     notes: str | None = None,
 ) -> Acknowledgement:
     """Record an operator acknowledgement and advance the event in one commit.
@@ -95,6 +95,11 @@ def acknowledge_event(
     The event must be awaiting acknowledgement. The transition is written in the
     same transaction as the acknowledgement record, so a failure cannot leave a
     logged acknowledgement against an unacknowledged event.
+
+    ``actor_id`` is None whenever the acting identity is unknown, which is the
+    normal case now that nothing authenticates a request. The acknowledgement is
+    still recorded, because the fact that the event was handled is real even
+    when the platform cannot prove who handled it.
     """
     if event.workflow_state not in ACKNOWLEDGABLE_STATES:
         raise WorkflowPreconditionError(
@@ -104,13 +109,13 @@ def acknowledge_event(
     previous_state = event.workflow_state
     acknowledgement = Acknowledgement(
         event_id=event.id,
-        user_id=user.id,
+        user_id=actor_id,
         notes=notes,
     )
     db.add(acknowledgement)
     db.add(EventStateTransition(
         event_id=event.id,
-        user_id=user.id,
+        user_id=actor_id,
         previous_state=previous_state,
         new_state="ACKNOWLEDGED",
         reason=notes or "Event acknowledged by operator",
@@ -126,18 +131,23 @@ def assign_event(
     event: Event,
     *,
     assignee: User,
-    assigner: User | None,
+    assigner: User | None = None,
     due_at=None,
     notes: str | None = None,
 ) -> Assignment:
-    """Assign an acknowledged event to an active user and advance the workflow."""
+    """Assign an acknowledged event to an active identity and advance the workflow.
+
+    The assignee is a named operator identity, which is meaningful without
+    authentication: work is still directed at a person. The assigner is the
+    acting identity and is None when it cannot be established.
+    """
     if event.workflow_state not in ASSIGNABLE_STATES:
         raise WorkflowPreconditionError(
             f"An event in state '{event.workflow_state}' cannot be assigned; "
             f"expected one of {sorted(ASSIGNABLE_STATES)}"
         )
     if not assignee.is_active:
-        raise WorkflowPreconditionError("An event cannot be assigned to an inactive user")
+        raise WorkflowPreconditionError("An event cannot be assigned to an inactive identity")
     assignment = Assignment(
         event_id=event.id,
         assigned_to_user_id=assignee.id,

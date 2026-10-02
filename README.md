@@ -2,12 +2,13 @@
 
 ## Current Status
 
-- **IMPLEMENTED:** FastAPI authentication/camera/event/evidence/notification/analytics/configuration APIs, SQLAlchemy domain models behind a migration-owned schema, bounded rolling frame buffer, explicit-path Ultralytics adapter, detection validation, visual-only IoU tracking, continuous observed camera-health polling, audited event workflow transitions, one-time operator-supplied admin bootstrap, derived health semantics, and credential redaction shared by APIs and reports.
-- **PARTIALLY IMPLEMENTED:** RTSP and prerecorded-file ingestion are connected to the Phase 4 pipeline, but no real source has been tested in this workspace.
+- **IMPLEMENTED:** Migration-owned FastAPI/SQLAlchemy backend, real webcam discovery and dashboard preview through the shared capture buffer, RTSP/file ingestion, explicit-path Ultralytics adapter, detection validation, visual-only tracking, configured fire/smoke/restricted-zone event orchestration, temporal verification, event-linked evidence/correlation, audited response lifecycles, and truthful health states.
+- **PARTIALLY IMPLEMENTED:** Safety event evaluation requires a compatible model and authorized detector/zone configuration. PPE absence, proximity, fall, leakage, and unsafe-behavior detection are not implemented. External email/webhook/SMS delivery has no sender.
+- **REAL-INPUT CHECK:** This laptop's webcam was opened through the backend on device 0 using DSHOW; a 640x480 real preview decoded in the browser and measured 8.06 FPS in the final UI run. This validates camera acquisition only, not AI inference, safety-event detection, alarm delivery, or IGL performance.
 - **NOT_CONFIGURED:** No model weights are present. The default model state is `MODEL_NOT_CONFIGURED`; no detections are fabricated and weights are never downloaded automatically.
-- **PARTIALLY IMPLEMENTED:** Temporal verification, polygon membership, and PPE-rule interpretation are standalone software primitives; they are not connected to a real safety detector or event generation.
+- **NOT_IMPLEMENTED:** Authentication is absent. Development defaults allow anonymous access and are only suitable for a localhost demo. Production/staging configuration rejects anonymous access, but this build does not provide an authentication flow.
 - **NOT_VALIDATED:** No IGL validation data or metrics are available. This repository does not claim production readiness for any phase.
-- **BLOCKED_BY_REAL_INPUT:** Detection accuracy, tracking accuracy, sustained real-time performance, and IGL validation cannot be assessed without authorized footage, weights, and labeled data.
+- **BLOCKED_BY_EXTERNAL_INPUT:** Real inference/detection/alarm validation requires an authorized compatible checkpoint and source/configuration. IGL validation additionally requires approved IGL footage, layout/SOPs, and labeled evaluation data.
 
 No authorized IGL camera footage, plant layout, PPE SOP dataset, model checkpoint, or labeled IGL validation dataset is currently present in this workspace. No substitute data has been created to fill these gaps.
 
@@ -17,13 +18,14 @@ Use Python 3.13 or another environment compatible with the pinned packages.
 
 ```powershell
 python -m pip install -r backend/requirements.txt
-Copy-Item .env.example .env
-alembic -c backend/alembic.ini upgrade head
-python scripts/bootstrap_admin.py
-uvicorn backend.app.main:app --reload
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+python -m alembic -c backend/alembic.ini upgrade head
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-The bootstrap command prompts for a new username, email, full name, and password of at least 12 characters. It refuses to run after any user exists, never uses a default password, and startup never creates an administrator. A non-interactive `--configured` mode requires `BOOTSTRAP_ADMIN_ENABLED=true` plus every `BOOTSTRAP_ADMIN_*` value.
+This local build has no authentication. Keep it bound to localhost; the API does not accept or enforce an upstream proxy identity. Do not expose it to an untrusted network.
+
+In a second PowerShell terminal, start the static frontend with `python -m http.server 8001 --directory frontend`, then open `http://127.0.0.1:8001`.
 
 The default development database is `data/database.db`. It is git-ignored. Never delete or recreate an existing database to apply this setup. See [docs/setup.md](docs/setup.md) for configuration and production safeguards.
 
@@ -52,6 +54,6 @@ The second command reads `RTSP_URL` from the environment without echoing it. A J
 
 ## Scope
 
-The platform is an advisory layer. It does not control PLCs, machinery, valves, interlocks, or emergency systems. There is no safety event-generation engine, no PPE/proximity/fall/fire/leakage detector, no live video stream, and no face recognition or identity resolution. See [docs/architecture.md](docs/architecture.md), [docs/api.md](docs/api.md), and [docs/ai_validation.md](docs/ai_validation.md).
+The platform is advisory only and never controls PLCs, machinery, valves, interlocks, or emergency systems. Camera failures are automatically recorded as `CAMERA_FAILURE` with `NOT_ASSESSABLE`; supported safety events can only come from real model detections through configured detectors and zones. The browser alarm reacts only to persisted, confirmed safety events and can persist an acknowledgement; it does not create events. No authentication is present. See [docs/architecture.md](docs/architecture.md), [docs/api.md](docs/api.md), and [docs/ai_validation.md](docs/ai_validation.md).
 
-The frontend is a partial operational dashboard for the existing login, camera, event, evidence, analytics, configuration, audit, and system-health APIs. It does not provide live video or complete user administration. See [docs/igl_configuration.md](docs/igl_configuration.md).
+The frontend is a partial operational dashboard with real laptop webcam preview, system health, event review, evidence, analytics, configuration, audit, and a persisted-event local alarm. It does not provide user administration or external notification delivery. See [docs/igl_configuration.md](docs/igl_configuration.md).

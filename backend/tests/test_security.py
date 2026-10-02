@@ -1,9 +1,15 @@
 """Security regression tests.
 
-Covers credential redaction, secret handling, login throttling, response
-schemas, pagination bounds, correlation IDs, and camera-configuration audit
-behaviour. Every credential used here is a test fixture created inside the
-test; no real secret, camera, or production database is involved.
+Authentication was deliberately removed from this build, so these tests do not
+cover login, throttling, password hashing or token validation. They cover what
+the security surface actually is now: credential redaction in displayed and
+serialised output, encryption requirements for credential-bearing camera URLs,
+audit records that never contain camera source values, request-ID sanitisation,
+pagination bounds, response-model hygiene, the anonymous-access mode and its
+refusal when disabled, and repository secret hygiene.
+
+Every credential used here is a test fixture created inside the test; no real
+secret, camera, or production database is involved.
 """
 import os
 import sys
@@ -18,22 +24,22 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.auth import (
-    LoginRateLimiter,
-    get_current_active_user,
-    hash_password,
-    verify_password,
+from app.access_control import (
+    ANONYMOUS_ACCESS_STATE,
+    access_state,
+    log_audit_event,
+    require_permission,
+    require_role,
+    resolve_actor,
 )
-from app.config import DEVELOPMENT_SECRET_KEY, Settings
-from app.database import Base
-from app.main import app, seed_default_roles
+from app.config import Settings
+from app.database import Base, get_db
+from app.main import app, seed_reference_roles
 from app.models import AuditLog, Camera, CameraHealth, Role, User
-from app.schemas import LoginRequest, UserCreate
+from app.schemas import IdentityCreate
 from app.schemas_camera import CameraOut, sanitize_stream_url
 from app.schemas_system import AnalyticsSummaryOut, NotificationOut
 from app.utils.redaction import display_source_identifier, safe_source_identifier
-
-TEST_ADMIN_PASSWORD = "test-only-admin-password"
 
 
 @pytest.fixture
@@ -44,7 +50,7 @@ def session():
     engine = create_engine(
         "sqlite:///file:security_test_db?mode=memory&cache=shared&uri=true",
         connect_args={"check_same_thread": False, "uri": True},
-        poolclass=StaticPool,
+        poolclass=StaticPool
     )
     Base.metadata.create_all(bind=engine)
     db = sessionmaker(bind=engine)()
@@ -58,18 +64,15 @@ def session():
 
 @pytest.fixture
 def secured_client(session):
-    """A TestClient whose requests are served from an isolated test database."""
-    from app.database import get_db
-
-    seed_default_roles(session)
+    """A TestClient served from an isolated test database."""
+    seed_reference_roles(session)
     admin_role = session.query(Role).filter(Role.name == "ADMIN").one()
     session.add(User(
         username="security_admin",
         email="security_admin@example.test",
         full_name="Security Test Administrator",
-        hashed_password=hash_password(TEST_ADMIN_PASSWORD),
         role_id=admin_role.id,
-        is_active=True,
+        is_active=True
     ))
     session.commit()
 
@@ -80,15 +83,6 @@ def secured_client(session):
     with TestClient(app) as client:
         yield client, session
     app.dependency_overrides.clear()
-
-
-def admin_headers(client) -> dict:
-    response = client.post(
-        "/api/v1/auth/login",
-        json={"username": "security_admin", "password": TEST_ADMIN_PASSWORD},
-    )
-    assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +96,7 @@ def admin_headers(client) -> dict:
         "rtsp://operator:secret@camera.example:554/live?token=abc#frag",
         "https://secret@camera.example/live?password=hunter2",
         "rtsp://camera.example/live?token=abc",
-    ],
+    ]
 )
 def test_display_identifier_never_returns_credentials_or_query(source):
     displayed = display_source_identifier(source)
@@ -129,7 +123,7 @@ def test_report_identifier_marks_credentials_without_revealing_them():
         ("/srv/authorized/clip.mp4", "clip.mp4"),
         ("rtsp://camera.example:notaport/live", "rtsp://camera.example/live"),
         ("not a url at all", "not a url at all"),
-    ],
+    ]
 )
 def test_malformed_and_local_sources_are_reduced_safely(source, expected):
     assert display_source_identifier(source) == expected
@@ -162,13 +156,9 @@ def test_camera_response_schema_strips_credentials():
 # Secrets configuration
 # ---------------------------------------------------------------------------
 
-def test_production_requires_a_non_default_long_secret():
-    with pytest.raises(ValueError, match="Production requires"):
-        Settings(ENVIRONMENT="production")
-    with pytest.raises(ValueError, match="Production requires"):
-        Settings(ENVIRONMENT="production", SECRET_KEY="short")
-    configured = Settings(ENVIRONMENT="production", SECRET_KEY="k" * 48)
-    assert configured.SECRET_KEY.get_secret_value() == "k" * 48
+def test_no_signing_secret_exists_in_this_build():
+    """Authentication is gone, so no signing key is configured or committed."""
+    assert not hasattr(Settings(), "SECRET_KEY")
 
 
 def test_wildcard_cors_is_rejected_in_every_environment():
@@ -176,140 +166,165 @@ def test_wildcard_cors_is_rejected_in_every_environment():
         Settings(BACKEND_CORS_ORIGINS=["*"])
 
 
+@pytest.mark.parametrize("environment", ["production", "staging"])
+def test_non_local_environment_rejects_anonymous_access(environment):
+    with pytest.raises(ValueError, match="Anonymous access is only permitted"):
+        Settings(ENVIRONMENT=environment, _env_file=None)
+
+
+def test_non_local_environment_can_fail_closed_when_anonymous_access_is_disabled():
+    configured = Settings(
+        ENVIRONMENT="production",
+        ALLOW_ANONYMOUS_ACCESS=False,
+        _env_file=None,
+    )
+    assert configured.authentication_state() == "ANONYMOUS_ACCESS_DISABLED_AUTHENTICATION_REQUIRED"
+
+
 def test_secret_typed_settings_do_not_leak_in_repr():
     configured = Settings(RTSP_URL=SecretStr("rtsp://user:secret@camera.invalid/live"))
     assert "secret" not in repr(configured)
 
 
-def test_development_secret_key_is_only_a_named_development_default():
-    assert Settings().SECRET_KEY.get_secret_value() == DEVELOPMENT_SECRET_KEY
-    assert "development" in DEVELOPMENT_SECRET_KEY
+def test_access_model_is_reported_explicitly():
+    assert Settings(ALLOW_ANONYMOUS_ACCESS=True).authentication_state() == (
+        "ANONYMOUS_ACCESS_ENABLED_NO_AUTHENTICATION"
+    )
+    assert Settings(ALLOW_ANONYMOUS_ACCESS=False).authentication_state() == (
+        "ANONYMOUS_ACCESS_DISABLED_AUTHENTICATION_REQUIRED"
+    )
 
 
 # ---------------------------------------------------------------------------
-# Login throttling and password handling
+# Access control with no authentication
 # ---------------------------------------------------------------------------
 
-def test_login_rate_limiter_throttles_then_recovers():
-    limiter = LoginRateLimiter(attempts=3, window_seconds=60)
-    for moment in (100.0, 101.0, 102.0):
-        limiter.record_failure("client-a", now=moment)
-    assert limiter.is_limited("client-a", now=103.0) is True
-    assert limiter.is_limited("client-b", now=103.0) is False
-    assert limiter.is_limited("client-a", now=200.0) is False
+def test_resolve_actor_never_fabricates_an_identity():
+    assert resolve_actor() is None
+    assert access_state(None) == ANONYMOUS_ACCESS_STATE
 
 
-def test_login_throttle_returns_429_after_repeated_failures(secured_client):
+def test_declared_requirements_are_kept_visible():
+    """Endpoint requirements stay declared even though nothing can be checked."""
+    permission_dependency = require_permission("cameras:view")
+    role_dependency = require_role("ADMIN", "SAFETY_OFFICER")
+    assert permission_dependency.declared_permission == "cameras:view"
+    assert role_dependency.declared_roles == ("ADMIN", "SAFETY_OFFICER")
+
+
+def test_disabling_anonymous_access_refuses_instead_of_pretending(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ALLOW_ANONYMOUS_ACCESS", False)
+    with pytest.raises(Exception) as refusal:
+        require_permission("cameras:view")(None)
+    assert "Unmet requirement: cameras:view" in str(refusal.value)
+    with pytest.raises(Exception) as role_refusal:
+        require_role("ADMIN")(None)
+    assert "Unmet requirement: ADMIN" in str(role_refusal.value)
+    monkeypatch.setattr(settings, "ALLOW_ANONYMOUS_ACCESS", True)
+    assert require_permission("cameras:view")(None) is None
+
+
+def test_endpoints_refuse_when_anonymous_access_is_disabled(secured_client, monkeypatch):
+    from app.config import settings
+
     client, _ = secured_client
-    statuses = [
-        client.post(
-            "/api/v1/auth/login",
-            json={"username": "security_admin", "password": "wrong-password"},
-        ).status_code
-        for _ in range(6)
-    ]
-    assert 429 in statuses
-    assert statuses[-1] == 429
-    # The correct password is still refused while the client is throttled.
-    assert client.post(
-        "/api/v1/auth/login",
-        json={"username": "security_admin", "password": TEST_ADMIN_PASSWORD},
-    ).status_code == 429
+    monkeypatch.setattr(settings, "ALLOW_ANONYMOUS_ACCESS", False)
+    for path in (
+        "/api/v1/cameras",
+        "/api/v1/events",
+        "/api/v1/analytics/summary",
+        "/api/v1/notifications",
+        "/api/v1/configuration/plants",
+    ):
+        assert client.get(path).status_code == 401, path
+    # Health deliberately stays reachable so monitoring still works when
+    # access is closed. It returns only derived state and never mutates anything.
+    assert client.get("/api/v1/system/health").status_code == 200
 
 
-def test_password_hashing_is_bcrypt_and_salted():
-    first = hash_password(TEST_ADMIN_PASSWORD)
-    second = hash_password(TEST_ADMIN_PASSWORD)
-    assert first != TEST_ADMIN_PASSWORD
-    assert first != second
-    assert first.startswith("$2")
-    assert verify_password(TEST_ADMIN_PASSWORD, first) is True
-    assert verify_password("wrong-password", first) is False
-
-
-def test_password_schemas_reject_values_bcrypt_cannot_represent():
-    with pytest.raises(ValueError, match="at least 12"):
-        UserCreate(username="operator", email="op@example.test", full_name="Op", password="short")
-    with pytest.raises(ValueError, match="72 bytes"):
-        UserCreate(
-            username="operator",
-            email="op@example.test",
-            full_name="Op",
-            password="x" * 73,
-        )
-    with pytest.raises(ValueError, match="72 bytes"):
-        LoginRequest(username="operator", password="x" * 73)
-
-
-# ---------------------------------------------------------------------------
-# Response hygiene and authorization
-# ---------------------------------------------------------------------------
-
-def test_no_endpoint_exposes_password_hashes(secured_client):
-    client, _ = secured_client
-    headers = admin_headers(client)
-    for path in ("/api/v1/auth/me", "/api/v1/auth/users", "/api/v1/auth/audit-logs"):
-        body = client.get(path, headers=headers).text
-        assert "hashed_password" not in body
-        assert "$2b$" not in body
-        assert "$2a$" not in body
-
-
-def test_authentication_is_required_for_protected_endpoints(secured_client):
+def test_endpoints_are_reachable_while_anonymous_access_is_enabled(secured_client):
+    """Records the current, deliberately permissive behaviour of this build."""
     client, _ = secured_client
     for path in (
-        "/api/v1/auth/users",
-        "/api/v1/auth/audit-logs",
         "/api/v1/cameras",
         "/api/v1/events",
         "/api/v1/analytics/summary",
         "/api/v1/notifications",
         "/api/v1/system/health",
-        "/api/v1/system/ai-health",
-        "/api/v1/system/pipelines",
-        "/api/v1/configuration/plants",
     ):
-        assert client.get(path).status_code in (401, 403), path
+        assert client.get(path).status_code == 200, path
 
+
+def test_login_endpoint_does_not_exist(secured_client):
+    client, _ = secured_client
+    assert client.post("/api/v1/auth/login", json={"username": "x", "password": "y"}).status_code == 404
+    assert client.get("/api/v1/auth/me").status_code == 404
+
+
+def test_audit_rows_record_anonymous_access_rather_than_an_identity(session):
+    entry = log_audit_event(
+        db=session,
+        user_id=None,
+        action="TEST_ANONYMOUS_ACTION",
+        resource_type="CAMERA",
+        resource_id="camera-1",
+    )
+    assert entry.user_id is None
+    assert entry.details_json["access_state"] == ANONYMOUS_ACCESS_STATE
+
+
+# ---------------------------------------------------------------------------
+# Response hygiene
+# ---------------------------------------------------------------------------
 
 def test_response_models_exclude_internal_columns():
     assert "hashed_password" not in AnalyticsSummaryOut.model_fields
     assert "file_path" not in NotificationOut.model_fields
 
 
+def test_legacy_credential_column_is_never_populated():
+    """The column survives only so old migrations need no rewrite.
+
+    It stays nullable and nothing in this build writes a credential into it, so
+    a leftover value from before authentication was removed cannot be reused.
+    """
+    column = User.__table__.columns["hashed_password"]
+    assert column.nullable is True
+    # The identity creation schema exposes no password field at all.
+    assert "password" not in IdentityCreate.model_fields
+
+
 def test_pagination_bounds_are_enforced(secured_client):
     client, _ = secured_client
-    headers = admin_headers(client)
     for path in (
-        "/api/v1/auth/users?limit=0",
-        "/api/v1/auth/users?limit=100000",
-        "/api/v1/auth/users?offset=-1",
-        "/api/v1/auth/audit-logs?limit=0",
-        "/api/v1/auth/audit-logs?limit=100000",
         "/api/v1/cameras?limit=0",
         "/api/v1/cameras?limit=100000",
+        "/api/v1/cameras?offset=-1",
+        "/api/v1/events?limit=0",
+        "/api/v1/events?limit=100000",
     ):
-        assert client.get(path, headers=headers).status_code == 422, path
+        assert client.get(path).status_code == 422, path
 
 
 def test_camera_listing_is_paginated(secured_client):
     client, session = secured_client
-    headers = admin_headers(client)
     for index in range(3):
         camera = Camera(
             name=f"Test camera {index}",
             code=f"CAM-{index}",
-            stream_url=f"rtsp://camera.invalid/live{index}",
+            stream_url=f"rtsp://camera.invalid/live{index}"
         )
         session.add(camera)
         session.flush()
         session.add(CameraHealth(camera_id=camera.id, status="CONFIGURED", inference_status="NOT_RUNNING"))
     session.commit()
 
-    page = client.get("/api/v1/cameras?limit=2", headers=headers)
+    page = client.get("/api/v1/cameras?limit=2")
     assert page.status_code == 200
     assert len(page.json()) == 2
-    second_page = client.get("/api/v1/cameras?limit=2&offset=2", headers=headers)
+    second_page = client.get("/api/v1/cameras?limit=2&offset=2")
     assert len(second_page.json()) == 1
 
 
@@ -363,13 +378,12 @@ def test_invalid_encryption_key_is_rejected(monkeypatch):
         validate_camera_url_storage("rtsp://camera.example/live")
 
 
-def test_credential_urls_are_encrypted_at_rest(monkeypatch, tmp_path):
+def test_credential_urls_are_encrypted_at_rest(monkeypatch):
     from cryptography.fernet import Fernet
 
     from app.config import settings
 
     key = Fernet.generate_key().decode("ascii")
-    monkeypatch.setattr(settings, "CAMERA_URL_ENCRYPTION_KEY", SecretStr(key))
     monkeypatch.setattr(settings, "CAMERA_URL_ENCRYPTION_KEY", SecretStr(key))
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
@@ -395,13 +409,12 @@ def test_credential_urls_are_encrypted_at_rest(monkeypatch, tmp_path):
 def test_camera_audit_entries_do_not_record_stream_urls(secured_client):
     """Field names may be audited; camera source values and credentials may not."""
     client, session = secured_client
-    headers = admin_headers(client)
     source = "rtsp://camera.invalid/live"
     client.post("/api/v1/cameras", json={
         "name": "Audited camera",
         "code": "AUDIT-CAM",
         "stream_url": source,
-    }, headers=headers)
+    })
     entries = session.query(AuditLog).filter(AuditLog.action == "CAMERA_CREATED").all()
     assert entries
     for entry in entries:
@@ -421,7 +434,7 @@ def test_camera_creation_never_persists_credentials_without_encryption(monkeypat
     payload = CameraCreate(
         name="Credential camera",
         code="CRED-CAM",
-        stream_url="rtsp://operator:secret@camera.example/live?token=abc",
+        stream_url="rtsp://operator:secret@camera.example/live?token=abc"
     )
     with pytest.raises(ValueError, match="CAMERA_URL_ENCRYPTION_KEY is required"):
         CameraManager.create_camera(session, payload)

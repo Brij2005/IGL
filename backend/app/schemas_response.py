@@ -144,7 +144,10 @@ class AcknowledgementCreate(BaseModel):
 class AcknowledgementOut(BaseModel):
     id: str
     event_id: str
-    user_id: str
+    # Nullable because nothing authenticates a request in this build, so the
+    # acknowledging identity is usually unknown. A null value means the
+    # platform could not prove who handled the event.
+    user_id: Optional[str] = None
     acknowledged_at: datetime
     notes: Optional[str] = None
 

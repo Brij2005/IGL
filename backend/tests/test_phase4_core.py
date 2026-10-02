@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ai_models.detection import Detection
 from ai_models.ultralytics_adapter import UltralyticsModelAdapter
-from app.config import DEVELOPMENT_SECRET_KEY, Settings
+from app.config import Settings
 from app.services.tracker import IoUTracker
 from app.schemas_camera import CameraOut, sanitize_stream_url
 from app.utils.frame_buffer import FrameBuffer
@@ -29,7 +29,7 @@ def detection(timestamp, bbox=(1, 1, 8, 8), camera_id="cam-1"):
         confidence=0.9,
         bbox=bbox,
         model_name="unit-test-model",
-        model_version="test-only",
+        model_version="test-only"
     )
 
 
@@ -161,9 +161,17 @@ def test_model_adapter_rejects_invalid_weights(tmp_path):
 def test_model_adapter_requires_explicit_version_for_local_weights(tmp_path):
     weights = tmp_path / "model.pt"
     weights.write_bytes(b"not-a-real-model")
-    adapter = UltralyticsModelAdapter(str(weights))
+    adapter = UltralyticsModelAdapter(str(weights), model_name="configured-model")
     assert adapter.load() is False
     assert adapter.health()["status"] == "MODEL_VERSION_REQUIRED"
+
+
+def test_model_adapter_requires_explicit_name_for_local_weights(tmp_path):
+    weights = tmp_path / "model.pt"
+    weights.write_bytes(b"not-a-real-model")
+    adapter = UltralyticsModelAdapter(str(weights), model_version="configured-version")
+    assert adapter.load() is False
+    assert adapter.health()["status"] == "MODEL_NAME_REQUIRED"
 
 
 def test_model_adapter_reports_inference_errors_without_returning_detections():
@@ -177,6 +185,9 @@ def test_model_adapter_reports_inference_errors_without_returning_detections():
     with pytest.raises(RuntimeError, match="inference failed"):
         adapter.predict("cam-1", now, image())
     assert adapter.health()["status"] == "INFERENCE_ERROR"
+    assert adapter.health()["inference_count"] == 0
+    assert adapter.health()["inference_attempt_count"] == 1
+    assert adapter.health()["inference_failure_count"] == 1
 
 
 def test_camera_stream_urls_are_sanitized_for_api_responses():
@@ -201,14 +212,21 @@ def test_camera_stream_urls_are_sanitized_for_api_responses():
     assert "secret" not in camera.model_dump_json()
 
 
-def test_production_settings_reject_development_secret_and_wildcard_cors():
-    with pytest.raises(ValueError, match="Production requires"):
-        Settings(ENVIRONMENT="production")
-    production = Settings(ENVIRONMENT="production", SECRET_KEY="x" * 40)
-    assert production.SECRET_KEY.get_secret_value() == "x" * 40
+def test_settings_reject_unsafe_configuration():
+    """Deployment guardrails that still exist after authentication was removed.
+
+    SECRET_KEY no longer exists in this build, so the development-secret and
+    secret-length checks are gone with it. What remains is asserted here rather
+    than left implied.
+    """
     with pytest.raises(ValueError, match="Wildcard CORS"):
         Settings(BACKEND_CORS_ORIGINS=["*"])
-    assert DEVELOPMENT_SECRET_KEY not in repr(Settings())
+    with pytest.raises(ValueError, match="must not be below the initial delay"):
+        Settings(CAMERA_RECONNECT_MAX_DELAY_SECONDS=2.0, CAMERA_RECONNECT_INITIAL_DELAY_SECONDS=10.0)
+    with pytest.raises(ValueError, match="must not be below the base delay"):
+        Settings(NOTIFICATION_RETRY_MAX_SECONDS=20.0, NOTIFICATION_RETRY_BASE_SECONDS=100.0)
+    # This build carries no SECRET_KEY at all, so no secret can be committed.
+    assert not hasattr(Settings(), "SECRET_KEY")
 
 
 @pytest.mark.parametrize(
@@ -218,7 +236,7 @@ def test_production_settings_reject_development_secret_and_wildcard_cors():
         {"confidence": float("nan")},
         {"bbox": (1, 2, 1, 4)},
         {"bbox": (1, 2, float("inf"), 4)},
-    ],
+    ]
 )
 def test_detection_rejects_invalid_results(kwargs):
     now = datetime.now(timezone.utc)
@@ -247,7 +265,7 @@ def test_tracker_lifecycle_and_visual_identity_only():
 
     continued = tracker.update(
         "cam-1", [detection(now + timedelta(milliseconds=100), bbox=(2, 2, 9, 9))],
-        now + timedelta(milliseconds=100),
+        now + timedelta(milliseconds=100)
     )[0]
     assert continued.track_id == first.track_id
     assert continued.lifecycle_state == "TRACKED"

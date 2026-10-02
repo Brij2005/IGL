@@ -101,6 +101,12 @@ class Zone(Base):
     ppe_rules = relationship("PPERule", back_populates="zone", cascade="all, delete-orphan")
     equipments = relationship("Equipment", back_populates="zone")
     events = relationship("Event", back_populates="zone")
+    detector_configs = relationship("DetectorConfig", back_populates="zone")
+    safety_rules = relationship("SafetyRule", back_populates="zone")
+    operating_thresholds = relationship("OperatingThreshold", back_populates="zone")
+    escalation_policies = relationship("EscalationPolicy", back_populates="zone")
+    notification_policies = relationship("NotificationPolicy", back_populates="zone")
+    event_correlations = relationship("EventCorrelation", back_populates="zone")
 
 
 class Camera(Base):
@@ -126,25 +132,38 @@ class Camera(Base):
     tracks = relationship("Track", back_populates="camera", cascade="all, delete-orphan")
     detections = relationship("Detection", back_populates="camera", cascade="all, delete-orphan")
     events = relationship("Event", back_populates="camera", cascade="all, delete-orphan")
+    evidences = relationship("EventEvidence", back_populates="camera")
+    detector_configs = relationship("DetectorConfig", back_populates="camera")
+    operating_thresholds = relationship("OperatingThreshold", back_populates="camera")
+    escalation_policies = relationship("EscalationPolicy", back_populates="camera")
+    event_correlations = relationship("EventCorrelation", back_populates="camera")
 
 
 class CameraHealth(Base):
-    """Real-time operational & image quality metrics for a camera feed."""
+    """Real-time operational & image quality metrics for a camera feed.
+
+    Every measured column is nullable and stays NULL until a frame has actually
+    been observed. ``is_black``/``is_frozen`` are nullable for the same reason:
+    a camera that has never produced a frame must not report "not black" and
+    "not frozen" as if those had been observed.
+    """
     __tablename__ = "camera_health"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     camera_id = Column(String(36), ForeignKey("cameras.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
-    status = Column(String(50), default="UNKNOWN", nullable=False)  # ONLINE, DEGRADED, OFFLINE, UNRELIABLE, UNKNOWN
+    # NEVER_EVALUATED, CONFIGURED, CONNECTING, ONLINE, STALE, BLACK_FRAME,
+    # FROZEN, OFFLINE
+    status = Column(String(50), default="NEVER_EVALUATED", nullable=False)
     last_frame_timestamp = Column(DateTime(timezone=True), nullable=True)
     # Legacy unmeasured placeholders. Superseded by measured_fps and
     # frame_latency_ms; they stay NULL until a real measurement exists so no
     # API or report can present a fabricated zero as an observed value.
     fps = Column(Float, nullable=True)
     latency_ms = Column(Float, nullable=True)
-    is_frozen = Column(Boolean, default=False, nullable=False)
-    is_black = Column(Boolean, default=False, nullable=False)
+    is_frozen = Column(Boolean, nullable=True)
+    is_black = Column(Boolean, nullable=True)
     image_quality_score = Column(Float, nullable=True)
-    inference_status = Column(String(50), default="IDLE", nullable=False)
+    inference_status = Column(String(50), default="NOT_RUNNING", nullable=False)
     health_timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     measured_fps = Column(Float, nullable=True)
@@ -177,17 +196,40 @@ class Role(Base):
 
 
 class User(Base):
-    """Platform user account for access control and event assignment."""
+    """Operator identity record.
+
+    This build has no authentication, so a user is not a login account: nothing
+    here can sign in, and no password material is stored. The table is retained
+    because it still has functional purposes that are unrelated to login:
+
+    * it names who an event was assigned to and who reported an incident,
+    * it identifies the actor on audit and state-transition rows,
+    * it carries the role used to resolve notification recipients.
+
+    ``hashed_password`` remains only as a nullable legacy column and is always
+    NULL; authentication code that used it has been removed.
+    """
     __tablename__ = "users"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     role_id = Column(String(36), ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
     username = Column(String(100), unique=True, nullable=False, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    hashed_password = Column(String(255), nullable=False)
+    # Legacy column retained so no historical migration has to be rewritten. It
+    # stores no credential: authentication was removed from this build.
+    hashed_password = Column(String(255), nullable=True)
     full_name = Column(String(150), nullable=False)
     employee_code = Column(String(50), nullable=True, index=True)  # Optional enterprise ID
     is_active = Column(Boolean, default=True, nullable=False)
+    # Deactivation is an operational state, not an authentication one: a
+    # deactivated identity is not assignable work.
+    deactivated_at = Column(DateTime(timezone=True), nullable=True)
+    deactivated_by_user_id = Column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_users_deactivated_by_user_id"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -307,6 +349,21 @@ class Event(Base):
     started_at = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     model_version = Column(String(50), nullable=True)
+
+    # Detection provenance. An event that cannot name the detector, the temporal
+    # verdict, the thresholds and the weights that produced it cannot be audited,
+    # so every field here stays NULL when the corresponding evidence is absent.
+    detector_key = Column(String(50), nullable=True, index=True)
+    # TemporalVerifier states: DETECTED, PERSISTED, VERIFIED, INVALIDATED,
+    # NOT_ASSESSABLE. NULL means no temporal verification was performed.
+    verification_state = Column(String(40), nullable=True, index=True)
+    temporal_observations = Column(Integer, nullable=True)
+    temporal_duration_seconds = Column(Float, nullable=True)
+    threshold_source = Column(String(80), nullable=True)
+    source_reference = Column(String(500), nullable=True)
+    model_name = Column(String(100), nullable=True)
+    model_weights_checksum = Column(String(64), nullable=True)
+    provenance_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -322,10 +379,17 @@ class Event(Base):
     corrective_actions = relationship("CorrectiveAction", back_populates="event")
     notifications = relationship("Notification", back_populates="event")
     state_transitions = relationship("EventStateTransition", back_populates="event", cascade="all, delete-orphan")
+    escalations = relationship("EventEscalation", back_populates="event", cascade="all, delete-orphan")
 
 
 class EventEvidence(Base):
-    """Cryptographically or path-referenced evidence (snapshots, video clips)."""
+    """Cryptographically or path-referenced evidence (snapshots, video clips).
+
+    Evidence is only ever written from a real frame captured for a real event.
+    ``retention_expires_at`` is NULL when no retention policy is configured,
+    which means "retained indefinitely until an operator deletes it", not
+    "expires immediately".
+    """
     __tablename__ = "event_evidence"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
@@ -335,10 +399,20 @@ class EventEvidence(Base):
     file_hash = Column(String(64), nullable=True)  # SHA-256 for tampering verification
     thumbnail_path = Column(String(500), nullable=True)
     metadata_json = Column(JSON, nullable=True)
+    size_bytes = Column(Integer, nullable=True)
+    camera_id = Column(
+        String(36),
+        ForeignKey("cameras.id", ondelete="SET NULL", name="fk_event_evidence_camera_id"),
+        nullable=True,
+        index=True,
+    )
+    retention_policy = Column(String(50), nullable=True)
+    retention_expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     # Relationships
     event = relationship("Event", back_populates="evidences")
+    camera = relationship("Camera", back_populates="evidences")
 
 
 class EventStateTransition(Base):
@@ -452,12 +526,19 @@ class NearMiss(Base):
 
 
 class Acknowledgement(Base):
-    """Audit log of user acknowledging an unacknowledged event."""
+    """Audit log of an event being handled.
+
+    ``user_id`` is nullable because nothing in this build authenticates a
+    request, so the acting identity is normally unknown. The acknowledgement is
+    still recorded: the fact that the event was handled is real even when the
+    platform cannot prove who handled it. The row is visibly unattributed
+    rather than attributed to a person who may not have acted.
+    """
     __tablename__ = "acknowledgements"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     event_id = Column(String(36), ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     acknowledged_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     notes = Column(Text, nullable=True)
 
@@ -508,17 +589,37 @@ class CorrectiveAction(Base):
 
 
 class Notification(Base):
-    """Multi-channel alert dispatch tracking record."""
+    """Multi-channel alert dispatch tracking record.
+
+    Status values: QUEUED, SENDING, SENT, RETRYING, FAILED, NOT_CONFIGURED,
+    NOT_IMPLEMENTED.
+    External channels stay NOT_CONFIGURED until a real sender is configured;
+    nothing here may report SENT without a successful delivery attempt.
+    """
     __tablename__ = "notifications"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     event_id = Column(String(36), ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # No request is authenticated in this build, so a notification is addressed to
+    # a role or a label rather than to a signed-in user. user_id stays for a
+    # specific named recipient and is NULL when the audience is a role.
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    recipient_role = Column(String(50), nullable=True, index=True)
     channel = Column(String(50), default="DASHBOARD", nullable=False)  # DASHBOARD, EMAIL, SMS, TEAMS, WEBHOOK, BUZZER
     recipient = Column(String(255), nullable=True)
-    status = Column(String(50), default="PENDING", nullable=False)  # PENDING, SENT, FAILED, RETRYING
+    status = Column(String(50), default="QUEUED", nullable=False, index=True)
     sent_at = Column(DateTime(timezone=True), nullable=True)
     error_message = Column(Text, nullable=True)
+    # Delivery bookkeeping. retry_count and next_attempt_at make a retry schedule
+    # auditable instead of a silent background retry.
+    retry_count = Column(Integer, default=0, nullable=False)
+    max_attempts = Column(Integer, default=3, nullable=False)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    # Deduplication key so one event does not produce an unbounded alert storm.
+    dedup_key = Column(String(255), nullable=True, index=True)
+    provider = Column(String(50), nullable=True)
+    payload_summary = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     # Relationships
@@ -548,7 +649,7 @@ class AuditLog(Base):
 # ============================================================================
 
 class ModelVersion(Base):
-    """Deplomatic registry for AI model versions."""
+    """Deployment registry for AI model versions."""
     __tablename__ = "model_versions"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
@@ -580,3 +681,180 @@ class ModelMetric(Base):
 
     # Relationships
     model_version = relationship("ModelVersion", back_populates="metrics")
+
+
+# ============================================================================
+# 7. SAFETY POLICY, DETECTOR CONFIGURATION, ESCALATION & CORRELATION
+# ============================================================================
+
+class DetectorConfig(Base):
+    """Operator configuration for one safety detector on a camera or zone.
+
+    A detector is only RUNNING when an enabled configuration exists *and* a
+    compatible model is loaded. This table never implies that a detector works:
+    it records what an operator asked for. ``validation_status`` stays
+    NOT_VALIDATED until a real evaluation exists.
+    """
+    __tablename__ = "detector_configs"
+    __table_args__ = (
+        UniqueConstraint("detector_key", "camera_id", "zone_id", name="uq_detector_scope"),
+    )
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    detector_key = Column(String(50), nullable=False, index=True)  # PPE, HELMET, SAFETY_VEST, RESTRICTED_ZONE, PROXIMITY, FALL, FIRE, SMOKE, LEAKAGE, UNSAFE_BEHAVIOR, PERSON
+    camera_id = Column(String(36), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=True, index=True)
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="CASCADE"), nullable=True, index=True)
+    is_enabled = Column(Boolean, default=False, nullable=False)
+    parameters_json = Column(JSON, nullable=True)
+    required_classes_json = Column(JSON, nullable=True)  # Model classes this detector needs
+    threshold_source = Column(String(80), default="ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION", nullable=False)
+    source_reference = Column(String(500), nullable=True)
+    validation_status = Column(String(50), default="NOT_VALIDATED", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    camera = relationship("Camera", back_populates="detector_configs")
+    zone = relationship("Zone", back_populates="detector_configs")
+
+
+class SafetyRule(Base):
+    """Site safety rule. Values are operator-supplied and always provenance-tagged."""
+    __tablename__ = "safety_rules"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    code = Column(String(50), nullable=False, unique=True, index=True)
+    name = Column(String(150), nullable=False)
+    description = Column(Text, nullable=True)
+    category = Column(String(50), nullable=True, index=True)  # PPE, ZONE, PROXIMITY, FIRE, ACCESS
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="SET NULL"), nullable=True, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    source_reference = Column(String(500), nullable=True)
+    validation_status = Column(String(50), default="NOT_VALIDATED", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    zone = relationship("Zone", back_populates="safety_rules")
+
+
+class OperatingThreshold(Base):
+    """A single named operating threshold with explicit provenance.
+
+    Engineering defaults are allowed but are tagged
+    ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION and never presented as IGL SOP
+    values. No row here is an accuracy or performance measurement.
+    """
+    __tablename__ = "operating_thresholds"
+    __table_args__ = (
+        UniqueConstraint("code", "zone_id", "camera_id", name="uq_threshold_scope"),
+    )
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    code = Column(String(80), nullable=False, index=True)
+    metric = Column(String(80), nullable=False)
+    value = Column(Float, nullable=False)
+    unit = Column(String(30), nullable=True)
+    comparison = Column(String(10), default="GT", nullable=False)  # GT, GTE, LT, LTE, EQ
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="CASCADE"), nullable=True, index=True)
+    camera_id = Column(String(36), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=True, index=True)
+    threshold_source = Column(String(80), default="ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION", nullable=False)
+    source_reference = Column(String(500), nullable=True)
+    validation_status = Column(String(50), default="NOT_VALIDATED", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    zone = relationship("Zone", back_populates="operating_thresholds")
+    camera = relationship("Camera", back_populates="operating_thresholds")
+
+
+class EscalationPolicy(Base):
+    """When and to whom an unhandled event escalates.
+
+    Policies are operator-supplied. With no policy configured the platform
+    reports ESCALATION_NOT_CONFIGURED rather than inventing a chain.
+    """
+    __tablename__ = "escalation_policies"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    name = Column(String(150), nullable=False)
+    event_type = Column(String(50), nullable=True, index=True)  # NULL = any event type
+    severity = Column(String(20), nullable=True, index=True)  # NULL = any severity
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="CASCADE"), nullable=True, index=True)
+    camera_id = Column(String(36), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=True, index=True)
+    escalate_after_seconds = Column(Integer, nullable=False, default=900)
+    from_role = Column(String(50), nullable=True)
+    to_role = Column(String(50), nullable=False)
+    escalation_level = Column(Integer, default=1, nullable=False)
+    notify_channels_json = Column(JSON, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    source_reference = Column(String(500), nullable=True)
+    created_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    zone = relationship("Zone", back_populates="escalation_policies")
+    camera = relationship("Camera", back_populates="escalation_policies")
+    escalations = relationship("EventEscalation", back_populates="policy", cascade="all, delete-orphan")
+
+
+class EventEscalation(Base):
+    """Record of a policy being applied to an event."""
+    __tablename__ = "event_escalations"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    event_id = Column(String(36), ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    policy_id = Column(String(36), ForeignKey("escalation_policies.id", ondelete="CASCADE"), nullable=False, index=True)
+    escalation_level = Column(Integer, default=1, nullable=False)
+    from_role = Column(String(50), nullable=True)
+    to_role = Column(String(50), nullable=False)
+    reason = Column(Text(), nullable=False)
+    triggered_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    event = relationship("Event", back_populates="escalations")
+    policy = relationship("EscalationPolicy", back_populates="escalations")
+
+
+class EventCorrelation(Base):
+    """Grouping of repeated related events for one camera and event type.
+
+    Correlation is computed from persisted events only. It never creates an
+    event and never invents a count.
+    """
+    __tablename__ = "event_correlations"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    correlation_key = Column(String(200), nullable=False, index=True)
+    camera_id = Column(String(36), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=True, index=True)
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_type = Column(String(50), nullable=False, index=True)
+    window_seconds = Column(Integer, nullable=False, default=300)
+    event_count = Column(Integer, default=1, nullable=False)
+    event_ids_json = Column(JSON, nullable=True)
+    first_event_at = Column(DateTime(timezone=True), nullable=False)
+    last_event_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    camera = relationship("Camera", back_populates="event_correlations")
+    zone = relationship("Zone", back_populates="event_correlations")
+
+
+class NotificationPolicy(Base):
+    """Which channel notifies which role for an event class."""
+    __tablename__ = "notification_policies"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    name = Column(String(150), nullable=False)
+    event_type = Column(String(50), nullable=True, index=True)
+    severity = Column(String(20), nullable=True, index=True)
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="CASCADE"), nullable=True, index=True)
+    channel = Column(String(50), nullable=False)
+    recipient_role = Column(String(50), nullable=False)
+    dedup_window_seconds = Column(Integer, default=300, nullable=False)
+    is_enabled = Column(Boolean, default=True, nullable=False)
+    source_reference = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    zone = relationship("Zone", back_populates="notification_policies")

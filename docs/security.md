@@ -2,24 +2,22 @@
 
 ## Implemented
 
-- Password hashing uses bcrypt; JWT tokens are signed and expiry-checked. API schemas reject passwords longer than bcrypt's 72-byte limit instead of silently truncating them.
-- Server-side role/permission dependencies protect current APIs.
-- Production configuration rejects the development JWT key and wildcard CORS.
-- The first administrator is created only by an explicit, one-time operator action. There is no hard-coded or default password, startup never creates an administrator, and bootstrap is refused once any user exists.
-- Login attempts are throttled per client IP in the current process. Use a shared rate-limit store for multi-worker deployments.
-- User, login, camera mutation, and event transition activity is audit-recorded.
+- Non-local (`production`/`staging`) settings reject `ALLOW_ANONYMOUS_ACCESS=true`; wildcard CORS is rejected in every environment.
+- Camera URL user information, queries, and fragments are redacted in API output. Credential/query-bearing URLs require an operator-supplied Fernet key for storage.
+- Evidence is resolved within the configured evidence directory and verified against its stored SHA-256 before serving.
+- Audit rows written without a verified identity use a NULL actor; the application does not claim an identity it cannot authenticate.
+- Responses carry a sanitized `X-Request-ID` header.
 - `.env` is Git-ignored. SQLite database files and generated caches are also Git-ignored and were removed from version control.
-- Camera API output strips URL user information, query parameters, and fragments, and delegates to the same redaction helper used by validation reports. Camera mutations do not place source URLs into audit details.
-- Credential/query-bearing camera URLs require an environment-supplied Fernet key for DB encryption. Keys are not generated or committed by the app.
-- Every response carries a correlation `X-Request-ID`; a caller-supplied value is accepted only when it matches a short restricted character set.
 
 ## Limitations
 
-- The application database and its SQLite file are not encrypted at rest by this code.
-- Non-credential camera URLs can remain plaintext in the DB. Legacy credential-bearing URLs created before encryption are not automatically re-encrypted; access without the matching key fails closed.
-- Fernet key rotation, multi-process rate limiting, session revocation, lockout policy persistence, and evidence-specific authorization policy have not received independent security review.
-- `User.employee_code` is an optional field but is not used to identify visual tracks. No face recognition or automatic identity mapping exists.
-- The bootstrap utility must be run through a controlled administrative terminal, or with complete operator-supplied configuration, once. It refuses to run if any user already exists.
+- Authentication is not implemented. In development/test, anonymous access defaults on and every reachable write API can be used anonymously; declared role/permission dependencies are not identity authorization. Bind only to localhost or an externally authenticated, network-restricted boundary.
+- With `ALLOW_ANONYMOUS_ACCESS=false`, protected API dependencies return 401 because no authentication flow exists. This is secure failure, not a usable production identity system.
+- Production/staging startup rejects anonymous access, but this repository is not production-deployable until authentication, authorization enforcement, secrets, transport security, and deployment controls are implemented and reviewed.
+- There is no external notification sender or delivery worker. SMTP/webhook settings do not imply delivery; configured-but-unsupported channels report `NOT_IMPLEMENTED`.
+- SQLite is a local-development database and is not encrypted at rest by this code. No production database topology has been certified.
+- Audit entries currently do not persist request IDs as a dedicated audit field. No independent penetration test or security certification has been performed.
+- Legacy credential-bearing camera URLs are not automatically re-encrypted; key rotation requires a separately planned procedure.
 - No security certification or independent penetration test has been performed.
 
 No production security certification or IGL security review is claimed.

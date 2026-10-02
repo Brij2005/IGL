@@ -13,3 +13,6 @@ data/*.db-wal
 data/*.db-shm
 *.sqlite
 *.sqlite3
+
+.vscode/
+.kilo/
