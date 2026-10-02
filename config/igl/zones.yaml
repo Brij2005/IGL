@@ -5,7 +5,22 @@ record_schema:
   area_id: null
   name: null
   code: null
+  # WORK_AREA, RESTRICTED, HAZARDOUS, PPE_MANDATORY.
+  # These are the zone kinds this build understands. An operator may use any of
+  # them; no IGL-specific zone name or hazard classification is assumed here.
   zone_type: null
+  # Normalized frame coordinates [[x, y], ...] as seen by the camera. NULL until
+  # an authorised operator draws or measures the real geometry.
   polygon_coordinates: null
+  # Where the geometry came from: drawing, survey, SOP, or NOT_CONFIGURED.
   coordinate_reference: null
+  # Free-text hazard description supplied by the plant, never invented here.
+  hazard_description: null
+  # PPE mandates that apply inside this zone, by PPE item code.
+  ppe_requirements: null
+  requires_ppe: null
+  is_active: null
   source_reference: null
+  # Author, date and approval for the record. Empty until an operator signs it off.
+  approved_by: null
+  approved_at: null

@@ -1,12 +1,22 @@
-"""Per-camera frame-to-model-to-visual-tracking pipeline."""
+"""Per-camera frame-to-model-to-visual-tracking pipeline.
+
+An operator who stops a camera means it. That intent is persisted outside the
+database, because no new column or migration may be introduced for it, so the
+background health worker does not quietly resume a camera an operator
+deliberately stopped after a backend restart. The marker file records nothing
+but the camera id and the moment of the stop; it never holds configuration.
+"""
 from __future__ import annotations
 
+import json
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+from sqlalchemy.engine import make_url
 
 from ai_models.ultralytics_adapter import UltralyticsModelAdapter
 
@@ -23,6 +33,81 @@ except ImportError:
 
 
 logger = logging.getLogger("igl.ai.pipeline")
+
+#: File that records cameras an operator stopped on purpose. It sits beside the
+#: data directory, which is git-ignored and holds deployment-local state only.
+OPERATOR_STOP_MARKER_FILENAME = "camera_operator_stops.json"
+
+
+def _database_directory() -> Path | None:
+    """Return the directory of the configured SQLite database, if there is one."""
+    try:
+        url = make_url(settings.DATABASE_URL.get_secret_value())
+    except Exception:  # noqa: BLE001 - an unparseable URL is not a reason to crash
+        return None
+    if url.get_backend_name() != "sqlite":
+        return None
+    database = url.database
+    if not database or database == ":memory:":
+        return None
+    return Path(database).expanduser().parent
+
+
+def operator_stop_marker_path() -> Path:
+    """Return the JSON marker file that records intentional operator stops."""
+    database_directory = _database_directory()
+    if database_directory is not None:
+        return database_directory / OPERATOR_STOP_MARKER_FILENAME
+    return Path(__file__).resolve().parents[3] / "data" / OPERATOR_STOP_MARKER_FILENAME
+
+
+def load_operator_stop_markers() -> dict[str, str]:
+    """Return the persisted operator stops, keyed by camera id.
+
+    An absent, unreadable, or corrupt marker file yields an empty set rather than
+    an error: losing a record of an intentional stop is bad, but refusing to
+    start because a state file is damaged would be worse.
+    """
+    path = operator_stop_marker_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.error(
+            "Operator stop markers could not be read",
+            extra={"component": "inference_pipeline", "error_type": type(exc).__name__},
+        )
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.error(
+            "Operator stop markers are not valid JSON and are being ignored",
+            extra={"component": "inference_pipeline", "marker_file": str(path)},
+        )
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(value) for key, value in payload.items()}
+
+
+def save_operator_stop_markers(markers: dict[str, str]) -> bool:
+    """Write the operator stop markers atomically. Returns whether it succeeded."""
+    path = operator_stop_marker_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(markers, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        logger.error(
+            "Operator stop markers could not be written",
+            extra={"component": "inference_pipeline", "error_type": type(exc).__name__},
+        )
+        return False
+    return True
+
 
 
 def build_observation_sink(
@@ -276,7 +361,9 @@ class InferencePipelineManager:
         self.tracker = IoUTracker()
         self._inference_lock = threading.Lock()
         self._pipelines: dict[str, CameraInferencePipeline] = {}
-        self._operator_stopped: set[str] = set()
+        # Hydrated from disk so a backend restart does not resume a camera the
+        # operator deliberately stopped.
+        self._operator_stopped: set[str] = set(load_operator_stop_markers())
         self._lock = threading.RLock()
         self._model_prepared = False
 
@@ -299,13 +386,16 @@ class InferencePipelineManager:
             if camera_id in self._operator_stopped and not operator_start:
                 return self._pipelines.get(camera_id)
             if operator_start:
-                self._operator_stopped.discard(camera_id)
+                self.clear_operator_stop(camera_id)
             current = self._pipelines.get(camera_id)
             if current and current.reader and current.reader.stream_url == stream_url and current.status()["pipeline_state"] != "STOPPED":
                 return current
+            # A camera that already had a pipeline is being reopened, even after
+            # stop_stream removed its reader from the ingestion manager.
+            reopening = current is not None or ingestion_manager.get_reader(camera_id) is not None
             self.stop_stream(camera_id)
             self.prepare_model()
-            reader = ingestion_manager.start_stream(camera_id, stream_url, target_fps)
+            reader = ingestion_manager.start_stream(camera_id, stream_url, target_fps, reopen=reopening)
             pipeline = CameraInferencePipeline(
                 camera_id,
                 self.model,
@@ -320,22 +410,49 @@ class InferencePipelineManager:
     def stop_stream(self, camera_id: str, *, operator_initiated: bool = False) -> None:
         with self._lock:
             if operator_initiated:
-                self._operator_stopped.add(camera_id)
+                self.record_operator_stop(camera_id)
             pipeline = self._pipelines.pop(camera_id, None)
             if pipeline:
                 pipeline.stop()
             ingestion_manager.stop_stream(camera_id)
+
+    def record_operator_stop(self, camera_id: str) -> None:
+        """Persist an intentional stop so a restart does not resume this camera.
+
+        Persisted outside the database because no column may be added for it. A
+        failure to write is logged, never reported as a stored stop: the
+        in-memory latch still holds for this process.
+        """
+        with self._lock:
+            self._operator_stopped.add(camera_id)
+            markers = {key: value for key, value in load_operator_stop_markers().items() if key != camera_id}
+            markers[camera_id] = datetime.now(timezone.utc).isoformat()
+            save_operator_stop_markers(markers)
+
+    def clear_operator_stop(self, camera_id: str) -> None:
+        """Forget an intentional stop because the operator has started the camera."""
+        with self._lock:
+            self._operator_stopped.discard(camera_id)
+            markers = load_operator_stop_markers()
+            if camera_id in markers:
+                markers.pop(camera_id)
+                save_operator_stop_markers(markers)
 
     def is_operator_stopped(self, camera_id: str) -> bool:
         with self._lock:
             return camera_id in self._operator_stopped
 
     def stop_all(self) -> None:
+        """Tear down every pipeline, keeping recorded operator stops intact.
+
+        A shutdown is not an operator decision about any individual camera, so
+        the persisted stops are deliberately left in place; the next process
+        reads them and still honours them.
+        """
         with self._lock:
             for camera_id in list(self._pipelines):
                 self.stop_stream(camera_id)
             ingestion_manager.stop_all()
-            self._operator_stopped.clear()
 
     def model_health(self) -> dict[str, Any]:
         return self.model.health()

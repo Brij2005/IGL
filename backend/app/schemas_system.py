@@ -58,9 +58,17 @@ class NotificationChannelStatusOut(BaseModel):
     ``configuration_state`` distinguishes absent settings from a configured
     channel whose sender is not implemented, so queue depth is never mistaken
     for evidence that an alert was delivered.
+
+    ``delivery_status`` and ``last_delivery_status`` carry the external
+    vocabulary (EMAIL_DELIVERED, EMAIL_DELIVERY_FAILED, ...). They are derived
+    from persisted rows only: ``last_delivery_status`` is None until an attempt
+    has actually been recorded, so a configured channel is never shown as
+    delivered on the strength of its settings.
     """
     channel: str
     configuration_state: str
+    delivery_status: Optional[str] = None
+    last_delivery_status: Optional[str] = None
     queued: int = 0
     sent: int = 0
     failed: int = 0

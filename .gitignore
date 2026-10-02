@@ -8,6 +8,7 @@ __pycache__/
 data/validation_reports/
 data/evidence/
 data/logs/
+data/camera_operator_stops.json
 *.db
 *.db-wal
 *.db-shm

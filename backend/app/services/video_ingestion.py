@@ -51,6 +51,8 @@ logger = logging.getLogger("igl.video.ingestion")
 STREAM_STATES = (
     "NOT_STARTED",
     "STARTING",
+    "REOPENING",
+    "REOPENED",
     "RUNNING",
     "END_OF_FILE",
     "SOURCE_UNAVAILABLE",
@@ -58,6 +60,16 @@ STREAM_STATES = (
     "RECONNECT_EXHAUSTED",
     "STOPPED",
 )
+
+#: States a reader may hold while it is deliberately closed and reopened by an
+#: operator action. REOPENING means the previous source is being torn down;
+#: REOPENED means the capture handle was re-established but no frame from the
+#: new session has been observed yet, so it is not yet RUNNING.
+REOPEN_STATES = ("REOPENING", "REOPENED")
+
+#: Reconnection states, derived from what the reader is actually doing rather
+#: than from a bare status string.
+RECONNECT_STATES = ("IDLE", "BACKOFF", "RECONNECT_EXHAUSTED")
 
 STREAM_URL_SCHEMES = ("rtsp://", "rtsps://", "http://", "https://")
 
@@ -73,6 +85,7 @@ class StreamReader:
         frame_buffer: FrameBuffer | None = None,
         connect_timeout_seconds: float | None = None,
         read_timeout_seconds: float | None = None,
+        reopen_requested: bool = False,
     ) -> None:
         self.camera_id = camera_id
         self.stream_url = stream_url
@@ -110,10 +123,18 @@ class StreamReader:
         self.source_backend: str | None = None
         self.reconnects: int = 0
         self.reconnect_attempts: int = 0
+        # True when this reader was created to replace a source an operator
+        # stopped, which is the only condition under which the reopen states are
+        # reported.
+        self.reopen_requested: bool = bool(reopen_requested)
         self.last_frame_interval_ms: float | None = None
         self._has_connected = False
         self._stop_event = threading.Event()
         self._frame_interval = (1.0 / self.target_fps) if self.target_fps > 0 else 0.0
+        # True only while the thread is actually sleeping between reconnect
+        # attempts, so the reported reconnect state cannot claim a backoff that
+        # is not happening.
+        self._reconnect_waiting: bool = False
 
         # Webcam sources open a capture device rather than a network stream. The
         # parsed configuration is None for every other source type.
@@ -158,6 +179,17 @@ class StreamReader:
         self._thread = threading.Thread(target=self._ingestion_loop, name=f"ingest-{self.camera_id}", daemon=True)
         self._thread.start()
 
+    def mark_reopening(self) -> None:
+        """Record that an operator reopen has begun for this camera.
+
+        The reader reports REOPENING from this moment until its replacement has
+        delivered a frame. It is not overwritten by the ordinary stop path,
+        because a stopped-then-restarted source is genuinely mid-reopen rather
+        than merely stopped.
+        """
+        self.reopen_requested = True
+        self.status = "REOPENING"
+
     def stop(self, timeout: float = 5.0) -> None:
         """Stop the worker and wait briefly for the thread to finish."""
         self._running = False
@@ -166,11 +198,28 @@ class StreamReader:
         if thread and thread.is_alive():
             thread.join(timeout=timeout)
         self.is_connected = False
-        if thread is None or not thread.is_alive():
+        if self.reopen_requested:
+            # A reopen in progress is a truthful state for a reader that has
+            # been stopped on purpose, so it is not collapsed into STOPPED.
+            self.status = "REOPENING"
+        elif thread is None or not thread.is_alive():
             self.status = "STOPPED"
         else:
             # The thread is still winding down; report that honestly.
             self.status = "STOPPING"
+
+    def reconnect_state(self) -> str:
+        """Return what the reader is doing about reconnection right now.
+
+        Derived from live state, not from the status string alone: an exhausted
+        attempt budget is terminal, a thread waiting out its backoff interval is
+        BACKOFF, and everything else is IDLE.
+        """
+        if self.status == "RECONNECT_EXHAUSTED":
+            return "RECONNECT_EXHAUSTED"
+        if self._reconnect_waiting and self._running:
+            return "BACKOFF"
+        return "IDLE"
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
@@ -294,7 +343,9 @@ class StreamReader:
             self._has_connected = True
             self._read_source_metadata(capture, is_file_source)
             self.last_error = None
-            self.status = "RUNNING"
+            # A reopened source is REOPENED, not RUNNING, until a frame from the
+            # new session has actually been observed.
+            self.status = "REOPENED" if self.reopen_requested else "RUNNING"
             reconnect_delay = settings.CAMERA_RECONNECT_INITIAL_DELAY_SECONDS
 
             self._read_loop(capture, is_file_source)
@@ -312,13 +363,19 @@ class StreamReader:
                 )
             self.is_connected = False
             if self._running and not is_file_source:
+                if self.reopen_requested and self.status == "REOPENED":
+                    # A reopened source that delivered nothing is disconnected,
+                    # not reopened. The reopen intent is kept so the first frame
+                    # that does arrive still completes it.
+                    self.status = "DISCONNECTED"
                 if not self._await_reconnect(reconnect_delay, max_attempts, is_file_source):
                     reconnect_delay = min(reconnect_delay * 1.5, max_delay)
 
         if self._running:
             self.status = "STOPPED"
-        elif self.status not in ("SOURCE_UNAVAILABLE", "END_OF_FILE", "RECONNECT_EXHAUSTED"):
+        elif self.status not in ("SOURCE_UNAVAILABLE", "END_OF_FILE", "RECONNECT_EXHAUSTED", *REOPEN_STATES):
             self.status = "STOPPED"
+        self._reconnect_waiting = False
 
     def _await_reconnect(self, delay: float, max_attempts: int, is_file_source: bool) -> bool:
         """Wait before reconnecting.
@@ -345,7 +402,11 @@ class StreamReader:
                 },
             )
             return True
-        self._stop_event.wait(delay)
+        self._reconnect_waiting = True
+        try:
+            self._stop_event.wait(delay)
+        finally:
+            self._reconnect_waiting = False
         return not self._running
 
     def _read_source_metadata(self, capture: cv2.VideoCapture, is_file_source: bool) -> None:
@@ -418,6 +479,11 @@ class StreamReader:
             now = datetime.now(timezone.utc)
             frames_in_window += 1
             self.total_frames_read += 1
+            if self.status == "REOPENED":
+                # The reopened source has now produced a real frame, so the
+                # reopen is complete and the reader is genuinely running.
+                self.status = "RUNNING"
+                self.reopen_requested = False
             if self.first_frame_timestamp is None:
                 self.first_frame_timestamp = now
             self.last_frame_timestamp = now
@@ -491,6 +557,8 @@ class StreamReader:
             "buffer_rejections": self.buffer_rejections,
             "reconnects": self.reconnects,
             "reconnect_attempts": self.reconnect_attempts,
+            "reconnect_state": self.reconnect_state(),
+            "reopen_requested": self.reopen_requested,
             "source_resolution": list(self.source_resolution) if self.source_resolution else None,
             "source_fps": self.source_fps,
             "source_duration_seconds": self.source_duration_seconds,
@@ -518,6 +586,9 @@ class StreamIngestionManager:
             if cls._instance is None:
                 cls._instance = super(StreamIngestionManager, cls).__new__(cls)
                 cls._instance._readers: Dict[str, StreamReader] = {}
+                # Cameras whose source was torn down by stop_all and is therefore
+                # due to be reported as reopened by the next start.
+                cls._instance._reopen_pending: set[str] = set()
             return cls._instance
 
     def start_stream(
@@ -525,15 +596,30 @@ class StreamIngestionManager:
         camera_id: str,
         stream_url: str,
         target_fps: float | None = None,
+        *,
+        reopen: bool = False,
     ) -> StreamReader:
         with self._lock:
             existing = self._readers.get(camera_id)
             if existing is not None and existing.stream_url == stream_url and existing.is_alive():
                 return existing
             if existing is not None:
+                # Replacing a live source is an operator reopen: the outgoing
+                # reader says so, and the incoming one reports REOPENED until
+                # its first frame arrives.
+                existing.mark_reopening()
                 existing.stop()
+            # A caller that already stopped this camera's pipeline is
+            # reopening it, even though the reader itself is long gone.
+            reopened = reopen or existing is not None or camera_id in self._reopen_pending
+            self._reopen_pending.discard(camera_id)
 
-            reader = StreamReader(camera_id=camera_id, stream_url=stream_url, target_fps=target_fps)
+            reader = StreamReader(
+                camera_id=camera_id,
+                stream_url=stream_url,
+                target_fps=target_fps,
+                reopen_requested=reopened,
+            )
             reader.start()
             self._readers[camera_id] = reader
             return reader
@@ -541,6 +627,7 @@ class StreamIngestionManager:
     def stop_stream(self, camera_id: str) -> None:
         with self._lock:
             reader = self._readers.pop(camera_id, None)
+            self._reopen_pending.discard(camera_id)
         if reader is not None:
             reader.stop()
 
@@ -556,6 +643,12 @@ class StreamIngestionManager:
         with self._lock:
             readers = list(self._readers.values())
             self._readers.clear()
+            # A bulk stop is a bulk interruption. Cameras that were really
+            # running are recorded as due-for-reopen so the next start reports
+            # the reopen honestly rather than pretending nothing happened.
+            self._reopen_pending.update(
+                reader.camera_id for reader in readers if reader.is_alive()
+            )
         for reader in readers:
             reader.stop()
 

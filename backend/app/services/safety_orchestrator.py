@@ -10,7 +10,11 @@ the inference pipeline and performs, in order:
    from configuration.
 4. Create or update an Event only from a real positive observation, recording
    detector, verification state, thresholds, model name and weights checksum.
-5. Capture evidence from the very frame that produced the observation.
+   Per-rule debounce and cooldown decide whether this observation opens a new
+   event at all, and both report an explicit suppression status when they stop
+   one from being created.
+5. Capture evidence from the very frame that produced the observation, unless
+   the rule's evidence policy says to skip it.
 6. Correlate the event with persisted events, and notify only when a policy
    says so.
 
@@ -28,15 +32,14 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 try:
-    from app.config import settings
     from app.models import Camera, Detection, DetectorConfig, Event, EventEvidence, Notification, OperatingThreshold, Role, Track, User, Zone
     from app.services.correlation_engine import correlate_event
     from app.services.escalation_engine import evaluate_event_escalation, notification_targets
     from app.services.evidence_engine import evidence_engine
     from app.services.notification_engine import enqueue_notification
     from app.services.safety_engine import (
-        ENGINEERING_DEFAULT,
         detector_capabilities,
+        detector_rule_parameters,
         default_severity,
         evaluate_frame_class_detector,
         evaluate_restricted_zone,
@@ -45,15 +48,14 @@ try:
         verification_policy_from_configuration,
     )
 except ImportError:  # pragma: no cover
-    from backend.app.config import settings
     from backend.app.models import Camera, Detection, DetectorConfig, Event, EventEvidence, Notification, OperatingThreshold, Role, Track, User, Zone
     from backend.app.services.correlation_engine import correlate_event
     from backend.app.services.escalation_engine import evaluate_event_escalation, notification_targets
     from backend.app.services.evidence_engine import evidence_engine
     from backend.app.services.notification_engine import enqueue_notification
     from backend.app.services.safety_engine import (
-        ENGINEERING_DEFAULT,
         detector_capabilities,
+        detector_rule_parameters,
         default_severity,
         evaluate_frame_class_detector,
         evaluate_restricted_zone,
@@ -69,11 +71,17 @@ logger = logging.getLogger("igl.safety.orchestrator")
 OPEN_WORKFLOW_STATES = {
     "NEW",
     "UNACKNOWLEDGED",
+    "ESCALATED",
     "ACKNOWLEDGED",
     "ASSIGNED",
     "UNDER_INVESTIGATION",
     "ACTION_REQUIRED",
 }
+
+# States that close an event out. A cancelled event was withdrawn as false or no
+# longer applicable, so it must never be picked up again as an open event: doing
+# so would silently resurrect an event an operator already closed out.
+TERMINAL_WORKFLOW_STATES = {"CANCELLED", "RESOLVED", "CLOSED"}
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -200,8 +208,20 @@ class SafetyEventOrchestrator:
             .all()
         )
 
-        capabilities = {capability.detector_key: capability for capability in detector_capabilities(model_health, configs)}
+        capabilities = {capability.detector_key: capability for capability in detector_capabilities(model_health, configs, thresholds)}
         frame_height, frame_width = (int(frame.shape[0]), int(frame.shape[1])) if isinstance(frame, np.ndarray) and frame.size else (0, 0)
+
+        # The effective rule for each configured detector, resolved once per frame
+        # from configuration and reported back with the outcome.
+        rules = {
+            config.detector_key: detector_rule_parameters(
+                config.detector_key,
+                configs,
+                thresholds,
+                default_confidence=model_health.get("confidence_threshold"),
+            )
+            for config in configs
+        }
 
         observations = []
         for config in configs:
@@ -218,6 +238,7 @@ class SafetyEventOrchestrator:
                 )
                 continue
 
+            rule = rules[detector_key]
             if detector_key == "RESTRICTED_ZONE":
                 if not tracks:
                     observations.append(
@@ -242,18 +263,15 @@ class SafetyEventOrchestrator:
                         )
                     )
             else:
-                minimum_confidence, threshold_source, source_reference = self._confidence_floor(
-                    config, thresholds, detector_key, model_health
-                )
                 observations.append(
                     self._observation_entry(
                         evaluate_frame_class_detector(
                             detector_key,
                             detections=detections,
                             model_classes=model_health.get("classes") or (),
-                            minimum_confidence=minimum_confidence,
-                            threshold_source=threshold_source,
-                            source_reference=source_reference,
+                            minimum_confidence=rule.minimum_confidence,
+                            threshold_source=rule.source_for("minimum_confidence"),
+                            source_reference=rule.references.get("minimum_confidence"),
                         )
                     )
                 )
@@ -261,6 +279,17 @@ class SafetyEventOrchestrator:
         created_or_updated = []
         for entry in observations:
             if entry.get("state") == "SKIPPED" or not entry.get("condition_met"):
+                continue
+            rule = rules[entry["detector_key"]]
+            if rule.excludes_zone(entry.get("zone_id") or camera.zone_id):
+                # The rule is scoped to a zone this camera is not in, so the
+                # observation is reported and deliberately not turned into an
+                # event. It is not evidence about any other zone.
+                entry["state"] = "ZONE_SCOPING_EXCLUDED"
+                entry["reason"] = (
+                    f"Rule is scoped to zone {rule.zone_scoping}; this observation is outside that scope"
+                )
+                entry["event_created"] = False
                 continue
             outcome = self._apply_observation(
                 db=db,
@@ -270,12 +299,14 @@ class SafetyEventOrchestrator:
                 frame=frame,
                 observation=entry,
                 model_health=model_health,
+                rule=rule,
                 configs=configs,
                 thresholds=thresholds,
             )
             entry["event_created"] = outcome["event_created"]
             entry["event_id"] = outcome.get("event_id")
             entry["verification_state"] = outcome.get("verification_state")
+            entry["status"] = outcome.get("status")
             created_or_updated.append(outcome)
 
         return {
@@ -305,33 +336,6 @@ class SafetyEventOrchestrator:
             "observation": observation,
         }
 
-    @staticmethod
-    def _confidence_floor(
-        config: DetectorConfig,
-        thresholds: Sequence[OperatingThreshold],
-        detector_key: str,
-        model_health: Dict[str, Any],
-    ) -> tuple[float, str, Optional[str]]:
-        parameters = config.parameters_json or {}
-        if "minimum_confidence" in parameters:
-            source = config.threshold_source
-            reference = config.source_reference
-            if source == "CONFIGURED" and not reference:
-                source = ENGINEERING_DEFAULT
-            return float(parameters["minimum_confidence"]), source, reference
-        for threshold in thresholds:
-            if threshold.code == f"{detector_key}.minimum_confidence":
-                return (
-                    float(threshold.value),
-                    threshold.threshold_source,
-                    threshold.source_reference,
-                )
-        return (
-            float(model_health.get("confidence_threshold") or settings.MODEL_CONFIDENCE_THRESHOLD),
-            ENGINEERING_DEFAULT,
-            None,
-        )
-
     # ------------------------------------------------------------------
     # Temporal verification and event lifecycle
     # ------------------------------------------------------------------
@@ -345,6 +349,7 @@ class SafetyEventOrchestrator:
         frame: Optional[np.ndarray],
         observation: Dict[str, Any],
         model_health: Dict[str, Any],
+        rule,
         configs: Sequence[DetectorConfig],
         thresholds: Sequence[OperatingThreshold],
     ) -> Dict[str, Any]:
@@ -369,11 +374,74 @@ class SafetyEventOrchestrator:
                 .first()
             )
 
+        # Debounce and cooldown are defined over a tracked subject, so they only
+        # apply when this observation belongs to a track. A frame-level detector
+        # (fire, smoke, person, phone) has no track to key them on; repeats for
+        # those are governed by correlation instead.
+        subject_event = (
+            self._last_subject_event(db, camera.id, detector_key, track_row)
+            if track_row is not None
+            else None
+        )
+        elapsed_seconds = (
+            (timestamp - _as_utc(subject_event.started_at)).total_seconds()
+            if subject_event is not None and subject_event.started_at is not None
+            else None
+        )
+        if (
+            elapsed_seconds is not None
+            and 0 <= elapsed_seconds < rule.cooldown_seconds
+        ):
+            # An event was already raised for this track and detector recently
+            # enough. The observation is real and is recorded, but no new event
+            # is opened for it.
+            return {
+                "event_id": subject_event.id,
+                "event_created": False,
+                "status": "SUPPRESSED_COOLDOWN",
+                "suppressed": True,
+                "suppression_reason": (
+                    f"A {detector_key} event for this tracked subject was raised "
+                    f"{elapsed_seconds:.1f}s ago, inside the configured "
+                    f"{rule.cooldown_seconds}s cooldown"
+                ),
+                "cooldown_seconds": rule.cooldown_seconds,
+                "debounce_applied": False,
+                "verification_state": result.state,
+                "observations": result.observation_count,
+                "duration_seconds": result.duration_seconds,
+            }
+
         event = self._find_open_event(db, camera.id, detector_key, observation.get("track_id"))
+        debounce_applied = False
+        if event is None and elapsed_seconds is not None and 0 <= elapsed_seconds < rule.debounce_seconds:
+            # A candidate event for this subject was created moments ago and is
+            # no longer open, so this observation is inside the debounce window.
+            # A second row for the same brief condition would double-count it, so
+            # nothing new is created and the observation is reported as
+            # debounced.
+            return {
+                "event_id": subject_event.id,
+                "event_created": False,
+                "status": "SUPPRESSED_DEBOUNCE",
+                "suppressed": True,
+                "suppression_reason": (
+                    f"The previous {detector_key} event for this tracked subject started "
+                    f"{elapsed_seconds:.1f}s ago, inside the configured "
+                    f"{rule.debounce_seconds}s debounce window"
+                ),
+                "debounce_seconds": rule.debounce_seconds,
+                "debounce_applied": True,
+                "verification_state": result.state,
+                "observations": result.observation_count,
+                "duration_seconds": result.duration_seconds,
+            }
+
         provenance = {
             "detector_reason": observation["reason"],
             "object_class": observation.get("object_class"),
             "zone_code": getattr(zone, "code", None),
+            "frame_timestamp": _as_utc(timestamp).isoformat() if timestamp is not None else None,
             "verification": {
                 "state": result.state,
                 "observations": result.observation_count,
@@ -386,6 +454,15 @@ class SafetyEventOrchestrator:
                 "version": model_health.get("model_version"),
                 "weights_checksum_sha256": model_health.get("weights_checksum_sha256"),
             },
+            "rule": {
+                "evidence_policy": rule.evidence_policy,
+                "debounce_seconds": rule.debounce_seconds,
+                "cooldown_seconds": rule.cooldown_seconds,
+                "zone_scoping": rule.zone_scoping,
+                "severity": rule.severity,
+                "sources": rule.as_dict()["sources"],
+                "source_references": rule.as_dict()["source_references"],
+            },
             "frame_size": list(frame.shape[:2]) if isinstance(frame, np.ndarray) and frame.size else None,
         }
 
@@ -396,7 +473,7 @@ class SafetyEventOrchestrator:
                 track_id=track_row.id if track_row else None,
                 event_type=event_type_for(detector_key),
                 observation_state="CONFIRMED" if result.state == "VERIFIED" else "POSSIBLE",
-                severity=default_severity(detector_key),
+                severity=default_severity(detector_key, rule.severity),
                 workflow_state="NEW",
                 confidence=observation.get("confidence"),
                 duration_seconds=result.duration_seconds or None,
@@ -416,6 +493,7 @@ class SafetyEventOrchestrator:
             db.commit()
             db.refresh(event)
             event_created = True
+            status = "EVENT_CREATED"
         else:
             event.verification_state = result.state
             event.temporal_observations = result.observation_count
@@ -428,58 +506,130 @@ class SafetyEventOrchestrator:
             db.commit()
             db.refresh(event)
             event_created = False
+            status = "EVENT_UPDATED"
+            debounce_applied = elapsed_seconds is not None and elapsed_seconds < rule.debounce_seconds
 
-        correlation = correlate_event(db, event, self._correlation_window(configs, thresholds, detector_key))
-        evidence_status = "EVIDENCE_CAPTURE_DISABLED"
-        if self.capture_evidence and observation.get("confidence") is not None:
-            existing_evidence = db.query(EventEvidence.id).filter(EventEvidence.event_id == event.id).first()
-            if existing_evidence is not None:
-                evidence_status = "EVIDENCE_ALREADY_CAPTURED"
-            else:
-                captured = evidence_engine.capture_snapshot(
-                    db,
-                    event_id=event.id,
-                    camera_id=camera.id,
-                    frame_timestamp=timestamp,
-                    frame=frame,
-                )
-                evidence_status = captured.status
-                if captured.evidence is not None:
-                    captured.evidence.camera_id = camera.id
-                    captured.evidence.size_bytes = self._file_size(captured.evidence.file_path)
-                    db.commit()
+        correlation = correlate_event(db, event, rule.correlation_window_seconds)
+        evidence_status = self._capture_evidence(
+            db,
+            camera=camera,
+            event=event,
+            timestamp=timestamp,
+            frame=frame,
+            observation=observation,
+            rule=rule,
+        )
 
         notifications = self._notify_policy_targets(db, event, observation)
         escalation = evaluate_event_escalation(db, event, now=timestamp)
+        alarm = self._evaluate_alarm(db, event)
 
         return {
             "event_id": event.id,
             "event_created": event_created,
+            "status": status,
+            "suppressed": False,
             "verification_state": result.state,
             "observations": result.observation_count,
             "duration_seconds": result.duration_seconds,
             "correlation_key": correlation.correlation_key,
             "evidence_status": evidence_status,
+            "evidence_policy": rule.evidence_policy,
             "notifications_created": len(notifications),
             "escalation_status": escalation["status"],
+            "alarm_status": alarm["status"],
+            "alarm_id": alarm.get("alarm_id"),
+            "debounce_applied": debounce_applied,
+            "debounce_seconds": rule.debounce_seconds,
+            "cooldown_seconds": rule.cooldown_seconds,
         }
 
+    def _capture_evidence(
+        self,
+        db: Session,
+        *,
+        camera: Camera,
+        event: Event,
+        timestamp: datetime,
+        frame: Optional[np.ndarray],
+        observation: Dict[str, Any],
+        rule,
+    ) -> str:
+        """Capture the frame that produced the observation, per the rule's policy.
+
+        The evidence policy is an operator decision about one rule, so SKIP is
+        reported as its own status. It is never reported as a capture failure,
+        and a rule that asks for evidence never loses it to the policy check.
+        """
+        if not self.capture_evidence:
+            return "EVIDENCE_CAPTURE_DISABLED"
+        if rule.evidence_policy != "CAPTURE":
+            return "EVIDENCE_SKIPPED_BY_RULE_POLICY"
+        if observation.get("confidence") is None:
+            return "EVIDENCE_NOT_AVAILABLE"
+        existing_evidence = db.query(EventEvidence.id).filter(EventEvidence.event_id == event.id).first()
+        if existing_evidence is not None:
+            return "EVIDENCE_ALREADY_CAPTURED"
+        captured = evidence_engine.capture_snapshot(
+            db,
+            event_id=event.id,
+            camera_id=camera.id,
+            frame_timestamp=timestamp,
+            frame=frame,
+        )
+        if captured.evidence is not None:
+            captured.evidence.camera_id = camera.id
+            captured.evidence.size_bytes = self._file_size(captured.evidence.file_path)
+            db.commit()
+        return captured.status
+
     @staticmethod
-    def _correlation_window(
-        configs: Sequence[DetectorConfig],
-        thresholds: Sequence[OperatingThreshold],
+    def _evaluate_alarm(db: Session, event: Event) -> Dict[str, Any]:
+        """Apply the alarm policy to a persisted event.
+
+        An alarm is only ever raised from a persisted, temporally verified event.
+        When the policy suppresses the raise, the suppression is recorded on the
+        open alarm so a repeated condition stays visible without re-alarming.
+        """
+        from app.services import alarm_engine  # local import keeps the module graph acyclic
+
+        decision = alarm_engine.evaluate_alarm_policy(db, event)
+        if decision["raise_alarm"]:
+            outcome = alarm_engine.raise_alarm_for_event(db, event)
+            return {
+                "status": "ALARM_RAISED" if outcome.get("raised") else f"ALARM_{decision['reason']}",
+                "alarm_id": outcome.get("alarm_id"),
+                "suppressed": bool(outcome.get("suppressed")),
+                "reason": outcome.get("reason"),
+            }
+        if decision.get("suppressed") and decision.get("existing_alarm_id"):
+            alarm_engine.record_suppression(db, event, decision["reason"] or "SUPPRESSED")
+            return {"status": f"ALARM_SUPPRESSED_{decision['reason']}", "alarm_id": decision["existing_alarm_id"], "suppressed": True, "reason": decision["reason"]}
+        return {"status": f"ALARM_NOT_RAISED_{decision['reason']}", "alarm_id": None, "suppressed": bool(decision.get("suppressed")), "reason": decision["reason"]}
+
+    @staticmethod
+    def _last_subject_event(
+        db: Session,
+        camera_id: str,
         detector_key: str,
-    ) -> int:
-        for config in configs:
-            if config.detector_key != detector_key:
-                continue
-            parameters = config.parameters_json or {}
-            if "correlation_window_seconds" in parameters:
-                return max(1, int(parameters["correlation_window_seconds"]))
-        for threshold in thresholds:
-            if threshold.code == f"{detector_key}.correlation_window_seconds":
-                return max(1, int(threshold.value))
-        return settings.EVENT_CORRELATION_WINDOW_SECONDS
+        track_row: Track,
+    ) -> Optional[Event]:
+        """The most recent event raised for this camera, detector and track.
+
+        This is the reference the debounce and cooldown windows are measured
+        against, so it deliberately looks past workflow state: a closed event is
+        still the last thing that happened for this subject.
+        """
+        return (
+            db.query(Event)
+            .filter(
+                Event.camera_id == camera_id,
+                Event.detector_key == detector_key,
+                Event.track_id == track_row.id,
+            )
+            .order_by(Event.started_at.desc(), Event.created_at.desc())
+            .first()
+        )
 
     @staticmethod
     def _find_open_event(db: Session, camera_id: str, detector_key: str, track_uuid: Optional[str]) -> Optional[Event]:
@@ -487,7 +637,9 @@ class SafetyEventOrchestrator:
 
         Repeat protection: an open event for the same camera, detector and
         tracked object is updated instead of creating a duplicate row for every
-        frame.
+        frame. Closed-out states are excluded explicitly, so a cancelled event
+        (withdrawn as false or no longer applicable) is never silently reopened
+        by a later observation.
         """
         query = (
             db.query(Event)
@@ -495,6 +647,7 @@ class SafetyEventOrchestrator:
                 Event.camera_id == camera_id,
                 Event.detector_key == detector_key,
                 Event.workflow_state.in_(sorted(OPEN_WORKFLOW_STATES)),
+                Event.workflow_state.notin_(sorted(TERMINAL_WORKFLOW_STATES)),
                 Event.ended_at.is_(None),
             )
             .order_by(Event.started_at.desc())

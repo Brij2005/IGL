@@ -101,6 +101,7 @@ DetectorKey = Literal[
     "LEAKAGE",
     "UNSAFE_BEHAVIOR",
     "PERSON",
+    "PHONE",
 ]
 Comparison = Literal["GT", "GTE", "LT", "LTE", "EQ"]
 

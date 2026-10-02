@@ -282,6 +282,9 @@ class WebcamRegisterRequest(BaseModel):
     width: int = Field(default=1280, ge=160, le=4096)
     height: int = Field(default=720, ge=120, le=2160)
     fps: float = Field(default=15.0, ge=1.0, le=120.0)
+    # Requested capture backend. Omitted keeps the DSHOW -> MSMF -> ANY probe
+    # order; naming one only changes the order the probe tries them in.
+    backend: Optional[str] = None
     name: str = Field(default="Laptop Webcam", min_length=2, max_length=150)
     code: Optional[str] = Field(default=None, max_length=50)
     zone_id: Optional[str] = Field(default=None, max_length=36)
@@ -292,10 +295,14 @@ class WebcamStatusOut(BaseModel):
     """Observed source state for a running camera.
 
     Every rate and count is measured from frames that actually arrived. A camera
-    that has not produced a frame reports ``measured_fps`` as null.
+    that has not produced a frame reports ``measured_fps`` as null. The
+    reconnect fields come from the reader's live state: ``reconnect_attempts``
+    counts open attempts and ``reconnect_state`` says what the reader is doing
+    about them right now.
     """
 
     camera_id: str
+    camera_name: Optional[str] = None
     source_type: str
     stream_state: str
     running: bool
@@ -308,6 +315,9 @@ class WebcamStatusOut(BaseModel):
     dropped_frames: int
     decode_failures: int
     reconnects: int
+    reconnect_attempts: int = 0
+    reconnect_state: str = "IDLE"
+    reopen_in_progress: bool = False
     last_frame_timestamp: Optional[str] = None
     last_frame_interval_ms: Optional[float] = None
     resolution: Optional[List[int]] = None
@@ -354,9 +364,9 @@ def register_webcam_camera(
     The webcam is only registered if a frame was actually read from that device,
     so the database never gains a camera that does not exist.
     """
-    from app.services.webcam_source import probe_device
+    from app.services.webcam_source import build_webcam_url, probe_device
 
-    probe = probe_device(payload.device_index, read_frame=True)
+    probe = probe_device(payload.device_index, read_frame=True, backend=payload.backend)
     if not probe.available:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -366,7 +376,13 @@ def register_webcam_camera(
             ),
         )
 
-    stream_url = f"webcam://{payload.device_index}"
+    stream_url = build_webcam_url(
+        device_index=payload.device_index,
+        width=payload.width,
+        height=payload.height,
+        fps=payload.fps,
+        backend=payload.backend,
+    )
 
     camera_in = CameraCreate(
         name=payload.name,
@@ -392,6 +408,7 @@ def register_webcam_camera(
         resource_id=camera.id,
         details_json={
             "device_index": payload.device_index,
+            "requested_capture_backend": payload.backend or "AUTO_PROBE_ORDER",
             "observed_resolution": list(probe.resolution) if probe.resolution else None,
             "capture_backend": probe.backend,
         },
@@ -418,7 +435,7 @@ def start_camera_source(
             status_code=status.HTTP_409_CONFLICT,
             detail="Camera is deactivated; activate it before starting its source",
         )
-    pipeline_manager.start_stream(camera.id, camera.stream_url, camera.fps)
+    pipeline_manager.start_stream(camera.id, camera.stream_url, camera.fps, operator_start=True)
     log_audit_event(
         db=db,
         user_id=actor.id if actor else None,
@@ -440,7 +457,7 @@ def stop_camera_source(
 ):
     """Stop a camera's ingestion worker. Stopping is idempotent."""
     camera = require_camera(db, camera_id)
-    pipeline_manager.stop_stream(camera_id)
+    pipeline_manager.stop_stream(camera_id, operator_initiated=True)
     log_audit_event(
         db=db,
         user_id=actor.id if actor else None,
@@ -475,6 +492,9 @@ def _webcam_status(db: Session, camera) -> WebcamStatusOut:
         "dropped_frames": 0,
         "decode_failures": 0,
         "reconnects": 0,
+        "reconnect_attempts": 0,
+        "reconnect_state": "IDLE",
+        "reopen_requested": False,
         "observed_frames": False,
     }
     pipelines = pipeline_manager.pipeline_status(camera.id)
@@ -485,6 +505,7 @@ def _webcam_status(db: Session, camera) -> WebcamStatusOut:
 
     return WebcamStatusOut(
         camera_id=camera.id,
+        camera_name=camera.name,
         source_type=telemetry.get("source_type", "UNKNOWN"),
         stream_state=telemetry.get("stream_state", "UNKNOWN"),
         running=bool(telemetry.get("is_connected")) and bool(telemetry.get("observed_frames")),
@@ -497,6 +518,10 @@ def _webcam_status(db: Session, camera) -> WebcamStatusOut:
         dropped_frames=int(telemetry.get("dropped_frames") or 0),
         decode_failures=int(telemetry.get("decode_failures") or 0),
         reconnects=int(telemetry.get("reconnects") or 0),
+        # The reader already counts these; the API only relays them.
+        reconnect_attempts=int(telemetry.get("reconnect_attempts") or 0),
+        reconnect_state=str(telemetry.get("reconnect_state") or "IDLE"),
+        reopen_in_progress=bool(telemetry.get("reopen_requested")),
         last_frame_timestamp=(
             telemetry["last_frame_timestamp"].isoformat() if telemetry.get("last_frame_timestamp") else None
         ),

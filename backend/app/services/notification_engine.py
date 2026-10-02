@@ -36,9 +36,51 @@ EXTERNAL_CHANNELS = {"EMAIL", "WHATSAPP", "WEBHOOK", "SMS", "TEAMS", "BUZZER"}
 
 TERMINAL_STATES = {"SENT", "FAILED", "NOT_CONFIGURED", "NOT_IMPLEMENTED"}
 
+# External delivery vocabulary. The persisted Notification.status values above
+# stay unchanged; this layer only translates them into the words an operator
+# reads on a dashboard or in an API response.
+DELIVERED = "DELIVERED"
+DELIVERY_FAILED = "DELIVERY_FAILED"
+NOT_CONFIGURED = "NOT_CONFIGURED"
+NOT_ATTEMPTED = "NOT_ATTEMPTED"
+PENDING = "PENDING"
+STATUS_UNKNOWN = "STATUS_UNKNOWN"
+
+_STATUS_GROUPS = {
+    DELIVERED: {"SENT"},
+    DELIVERY_FAILED: {"FAILED", "RETRYING", "DELIVERY_FAILED"},
+    NOT_CONFIGURED: {"NOT_CONFIGURED", "NOT_IMPLEMENTED"},
+    PENDING: {"QUEUED", "SENDING"},
+}
+
 
 class NotificationConfigurationError(ValueError):
     pass
+
+
+def _status_group(status: str | None, channel: str) -> str:
+    """Fold a persisted or transport status into one of the external groups."""
+    normalized = (status or "").strip().upper()
+    if not normalized:
+        return NOT_ATTEMPTED
+    # The transport layer reports channel-scoped names for the same outcomes.
+    normalized = normalized.removeprefix(f"{channel.upper()}_") if channel else normalized
+    for group, members in _STATUS_GROUPS.items():
+        if normalized in members:
+            return group
+    return STATUS_UNKNOWN
+
+
+def delivery_status_for(channel: str, status: str | None) -> str:
+    """The operator-facing delivery status for a channel and a stored status.
+
+    ``EMAIL_SENT`` maps to ``EMAIL_DELIVERED``, a failed or retrying attempt to
+    ``EMAIL_DELIVERY_FAILED``, an unconfigured or unimplemented channel to
+    ``EMAIL_NOT_CONFIGURED``. ``None`` maps to ``<CHANNEL>_NOT_ATTEMPTED``: no
+    attempt exists, so no delivery may be claimed.
+    """
+    group = _status_group(status, channel)
+    return f"{(channel or 'UNKNOWN').strip().upper()}_{group}"
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -242,6 +284,13 @@ def channel_status(db: Session) -> List[dict]:
             {
                 "channel": channel,
                 "configuration_state": state,
+                # delivery_status reflects the newest persisted row only, and
+                # last_delivery_status the newest row that was actually
+                # attempted. Both stay None or NOT_ATTEMPTED until a real
+                # attempt exists, so a configured channel is never shown as
+                # delivered on the strength of its settings.
+                "delivery_status": _channel_delivery_status(channel, channel_rows, state),
+                "last_delivery_status": _last_delivery_status(channel, channel_rows),
                 "queued": sum(1 for row in channel_rows if row.status in ("QUEUED", "RETRYING", "SENDING")),
                 "sent": sum(1 for row in channel_rows if row.status == "SENT"),
                 "failed": sum(1 for row in channel_rows if row.status == "FAILED"),
@@ -250,3 +299,25 @@ def channel_status(db: Session) -> List[dict]:
             }
         )
     return report
+
+
+def _channel_delivery_status(channel: str, channel_rows: List[Notification], state: str) -> str:
+    if channel_rows:
+        newest = max(channel_rows, key=lambda row: (_sort_key(row.created_at), row.id))
+        return delivery_status_for(channel, newest.status)
+    # With no queue row there is nothing delivered: an unconfigured channel says
+    # so, and a channel without any attempt stays pending rather than delivered.
+    return delivery_status_for(channel, "NOT_CONFIGURED" if state in ("NOT_CONFIGURED", "NOT_IMPLEMENTED") else "QUEUED")
+
+
+def _last_delivery_status(channel: str, channel_rows: List[Notification]) -> Optional[str]:
+    attempted = [row for row in channel_rows if row.last_attempt_at is not None]
+    if not attempted:
+        return None
+    newest = max(attempted, key=lambda row: (_sort_key(row.last_attempt_at), row.id))
+    return delivery_status_for(channel, newest.status)
+
+
+def _sort_key(value: Optional[datetime]) -> str:
+    """Order timestamps without comparing mixed naive and aware values."""
+    return value.isoformat() if isinstance(value, datetime) else ""

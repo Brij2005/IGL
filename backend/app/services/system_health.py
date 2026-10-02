@@ -6,6 +6,9 @@ explicit unavailable state rather than as a healthy one.
 """
 from __future__ import annotations
 
+import shutil
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select, literal
@@ -17,6 +20,7 @@ try:
     from app.services.continuous_health import camera_health_worker
     from app.services.inference_pipeline import pipeline_manager
     from app.services.notification_worker import notification_delivery_worker
+    from app.services.safety_event_worker import safety_event_worker
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import engine, get_migration_state
@@ -24,6 +28,7 @@ except ImportError:
     from backend.app.services.continuous_health import camera_health_worker
     from backend.app.services.inference_pipeline import pipeline_manager
     from backend.app.services.notification_worker import notification_delivery_worker
+    from backend.app.services.safety_event_worker import safety_event_worker
 
 
 APPLICATION_UP = "APPLICATION_UP"
@@ -38,6 +43,20 @@ CAMERA_NONE_ACTIVE = "CAMERA_RECORDED_BUT_NONE_ACTIVE"
 CAMERA_CONFIGURED_NOT_OBSERVED = "CAMERA_CONFIGURED_NOT_OBSERVED"
 NO_CAMERA = "NO_CAMERA"
 VALIDATION_NOT_VALIDATED = "NOT_VALIDATED"
+EMAIL_CONFIGURED = "EMAIL_CONFIGURED"
+EMAIL_NOT_CONFIGURED = "EMAIL_NOT_CONFIGURED"
+WHATSAPP_CONFIGURED = "WHATSAPP_CONFIGURED"
+WHATSAPP_NOT_CONFIGURED = "WHATSAPP_NOT_CONFIGURED"
+DISK_OK = "DISK_OK"
+DISK_LOW = "DISK_FREE_SPACE_BELOW_THRESHOLD"
+DISK_UNAVAILABLE = "DISK_UNAVAILABLE"
+ALARM_DISABLED = "ALARM_DISABLED_BY_POLICY"
+ALARM_READY = "ALARM_READY_EVENT_DRIVEN"
+
+# Process start is recorded at import time. Uptime is a real measurement of this
+# process, and it is reported as unavailable if the platform cannot read it.
+_PROCESS_START_MONOTONIC = time.monotonic()
+_PROCESS_START_WALL_CLOCK = datetime.now(timezone.utc)
 
 _SELECT_ONE = select(literal(1))
 _COUNT_PLANT = select(func.count()).select_from(Plant)
@@ -84,10 +103,140 @@ def _camera_state(camera_count: int, active_camera_ids: set[str], pipelines: lis
     return CAMERA_AVAILABLE if has_observed_frames else CAMERA_CONFIGURED_NOT_OBSERVED
 
 
+def _measured_performance(pipelines: list[dict]) -> dict:
+    """Report performance only from frames and inferences that really happened.
+
+    With no observed frame there is no FPS to report, and this returns
+    ``NOT_MEASURED_WITHOUT_OBSERVED_FRAMES`` rather than a zero.
+    """
+    observed = [item for item in pipelines if item.get("frames_seen", 0) > 0]
+    if not observed:
+        return {
+            "measured_performance": "NOT_MEASURED_WITHOUT_OBSERVED_FRAMES",
+            "camera_fps": None,
+            "inference_fps": None,
+        }
+    try:
+        from app.services.video_ingestion import ingestion_manager
+    except ImportError:  # pragma: no cover - import shim
+        from backend.app.services.video_ingestion import ingestion_manager
+    camera_fps_values = []
+    for item in observed:
+        reader = ingestion_manager.get_reader(item.get("camera_id"))
+        if reader is not None and reader.current_fps > 0:
+            camera_fps_values.append(float(reader.current_fps))
+    inference_values = []
+    for item in observed:
+        window = _inference_window(item)
+        if window and window > 0:
+            inference_values.append(item["inferences_completed"] / window)
+    return {
+        "measured_performance": "MEASURED_FROM_OBSERVED_FRAMES",
+        "camera_fps": round(max(camera_fps_values), 2) if camera_fps_values else None,
+        "inference_fps": round(max(inference_values), 2) if inference_values else None,
+    }
+
+
+def _inference_window(item: dict) -> float | None:
+    """Seconds between the first and last observed frame for a pipeline."""
+    first = item.get("last_frame_timestamp")
+    last = item.get("last_inference_timestamp")
+    if not first or not last:
+        return None
+    try:
+        seconds = (last - first).total_seconds()
+    except AttributeError:
+        return None
+    return seconds if seconds > 0 else None
+
+
 def _igl_configuration_status(plant_count: int, database_state: str) -> str:
     if database_state != DATABASE_OK:
         return "UNKNOWN_DATABASE_UNAVAILABLE"
     return "NOT_CONFIGURED" if plant_count == 0 else "CONFIGURED_NOT_VALIDATED"
+
+
+def _uptime() -> dict:
+    """Real process uptime. Reported as unavailable rather than guessed."""
+    try:
+        seconds = max(0.0, time.monotonic() - _PROCESS_START_MONOTONIC)
+    except Exception:  # pragma: no cover - defensive
+        return {"uptime_seconds": None, "uptime_state": "UPTIME_UNAVAILABLE"}
+    return {
+        "uptime_seconds": round(seconds, 3),
+        "uptime_human": _humanise_uptime(seconds),
+        "process_started_at": _PROCESS_START_WALL_CLOCK.isoformat(),
+        "uptime_state": "MEASURED",
+    }
+
+
+def _humanise_uptime(seconds: float) -> str:
+    total = int(seconds)
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
+def _disk_health() -> dict:
+    """Measure free space on the volume holding the evidence/database path."""
+    target = settings.HEALTH_DISK_PATH or settings.EVIDENCE_DIR
+    try:
+        path = Path(target).expanduser()
+        probe = path if path.exists() else path.parent
+        usage = shutil.disk_usage(probe)
+    except Exception:
+        return {"disk_state": DISK_UNAVAILABLE, "disk_path": str(target), "disk_free_bytes": None, "disk_free_percent": None}
+    free_percent = (usage.free / usage.total * 100.0) if usage.total else 0.0
+    low = usage.free < settings.HEALTH_DISK_MIN_FREE_BYTES or free_percent < settings.HEALTH_DISK_MIN_FREE_PERCENT
+    return {
+        "disk_state": DISK_LOW if low else DISK_OK,
+        "disk_path": str(target),
+        "disk_total_bytes": usage.total,
+        "disk_free_bytes": usage.free,
+        "disk_free_percent": round(free_percent, 2),
+        "disk_min_free_bytes": settings.HEALTH_DISK_MIN_FREE_BYTES,
+    }
+
+
+def _email_state() -> str:
+    """EMAIL_CONFIGURED only when a usable SMTP transport is configured.
+
+    This reports configuration, never delivery. A message is only reported as
+    delivered from a real SMTP server response.
+    """
+    password = settings.SMTP_PASSWORD.get_secret_value().strip() if settings.SMTP_PASSWORD else ""
+    configured = (
+        bool(settings.SMTP_HOST)
+        and bool(settings.NOTIFICATION_FROM_ADDRESS)
+        and (bool(settings.SMTP_USERNAME) == bool(password))
+    )
+    return EMAIL_CONFIGURED if configured else EMAIL_NOT_CONFIGURED
+
+
+def _whatsapp_state() -> str:
+    """WHATSAPP_CONFIGURED only when the Cloud API credentials are complete."""
+    token = settings.WHATSAPP_ACCESS_TOKEN.get_secret_value().strip() if settings.WHATSAPP_ACCESS_TOKEN else ""
+    configured = bool(token) and bool(settings.WHATSAPP_PHONE_NUMBER_ID and settings.WHATSAPP_API_VERSION)
+    return WHATSAPP_CONFIGURED if configured else WHATSAPP_NOT_CONFIGURED
+
+
+def _alarm_states() -> dict:
+    from app.services import physical_alarm
+
+    return {
+        "alarm_subsystem": ALARM_READY if settings.ALARM_ENABLED else ALARM_DISABLED,
+        "physical_alarm_state": physical_alarm.actuator_status()["state"],
+        "physical_alarm_transports": physical_alarm.actuator_status()["configured_transports"],
+    }
 
 
 def collect_system_health() -> dict:
@@ -118,10 +267,18 @@ def collect_system_health() -> dict:
         degraded_reasons.append(f"CAMERA_HEALTH_WORKER_{camera_health_worker.status}")
 
     database_reachable = database_state == DATABASE_OK
+    disk = _disk_health()
+    uptime = _uptime()
+    email_state = _email_state()
+    whatsapp_state = _whatsapp_state()
+    alarm = _alarm_states()
+    if disk["disk_state"] == DISK_LOW:
+        degraded_reasons.append(DISK_LOW)
     return {
         "overall_status": "DEGRADED" if degraded_reasons else "OPERATIONAL",
         "degraded_reasons": degraded_reasons,
         "application": APPLICATION_UP,
+        **uptime,
         "database": database_state,
         "migrations": migration_state,
         "camera_state": camera_state,
@@ -138,6 +295,13 @@ def collect_system_health() -> dict:
         "notification_subsystem": f"IN_APP_QUEUE_AVAILABLE_DELIVERY_WORKER_{notification_delivery_worker.status}",
         "notification_delivery_worker": notification_delivery_worker.status,
         "notification_delivery_last_error": notification_delivery_worker.last_error_type,
+        "email_transport": email_state,
+        "email_transport_note": "Configuration state only; delivery is reported per notification from the SMTP response.",
+        "whatsapp_transport": whatsapp_state,
+        "whatsapp_transport_note": "Configuration state only; delivery is reported per notification from the Cloud API response.",
+        "safety_event_worker": safety_event_worker.status,
+        "safety_event_worker_last_error": safety_event_worker.last_error_type,
+        **alarm,
         # Reports the configured authentication mode without implying that a
         # particular request has been authenticated.
         "access_control": settings.authentication_state(),
@@ -145,5 +309,6 @@ def collect_system_health() -> dict:
         "validation_status": VALIDATION_NOT_VALIDATED,
         "igl_validated": False,
         "igl_configuration_status": _igl_configuration_status(plant_count, database_state),
-        "measured_performance": "NOT_MEASURED_WITHOUT_OBSERVED_FRAMES",
+        **_measured_performance(pipelines),
+        **disk,
     }

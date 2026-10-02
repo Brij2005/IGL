@@ -15,6 +15,13 @@ was not measured from frames that actually arrived.
 Windows note: OpenCV cannot enumerate webcam names reliably through the standard
 backend, so :func:`probe_device` reports only what it can prove. A device is
 reported available only when a capture was opened *and* a frame was read back.
+
+A camera may also request a preferred capture backend with ``?backend=DSHOW``,
+``?backend=MSMF`` or ``?backend=ANY``. The preference changes only the order in
+which backends are tried: the automatic DSHOW -> MSMF -> ANY probe order remains
+the default, and a preference that cannot open the device still falls back, so a
+request never turns into a hard failure. The backend that actually opened the
+capture is reported in ``source_backend`` rather than the one that was asked for.
 """
 from __future__ import annotations
 
@@ -36,6 +43,9 @@ MAX_PROBE_INDEX = 5
 DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
 DEFAULT_TARGET_FPS = 15.0
+#: Capture backends a camera may request. The default probe order below is the
+#: one used when no preference is supplied.
+CAPTURE_BACKENDS = ("DSHOW", "MSMF", "ANY")
 
 
 class WebcamConfigurationError(ValueError):
@@ -50,6 +60,8 @@ class WebcamConfig:
     width: Optional[int] = None
     height: Optional[int] = None
     fps: Optional[float] = None
+    #: Requested capture backend, tried before the default probe order.
+    backend: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -57,6 +69,7 @@ class WebcamConfig:
             "width": self.width,
             "height": self.height,
             "fps": self.fps,
+            "backend": self.backend,
         }
 
 
@@ -113,6 +126,25 @@ def _parse_device_index(raw: str) -> int:
     return value
 
 
+def normalize_backend(raw: str | None) -> Optional[str]:
+    """Return a supported capture backend name, or None when none was requested.
+
+    An unrecognised value is a configuration error rather than something to
+    silently ignore, because a camera quietly probing the wrong backend looks
+    identical to a camera that works.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip().upper()
+    if not text:
+        return None
+    if text not in CAPTURE_BACKENDS:
+        raise WebcamConfigurationError(
+            f"backend must be one of {', '.join(CAPTURE_BACKENDS)}, received '{raw}'"
+        )
+    return text
+
+
 def parse_webcam_url(stream_url: str) -> WebcamConfig:
     """Parse a ``webcam://`` URL into a validated configuration."""
     if not is_webcam_source(stream_url):
@@ -139,7 +171,9 @@ def parse_webcam_url(stream_url: str) -> WebcamConfig:
         if fps <= 0:
             raise WebcamConfigurationError(f"fps must be greater than zero, received {fps}")
 
-    return WebcamConfig(device_index=device_index, width=width, height=height, fps=fps)
+    backend = normalize_backend(query["backend"][0]) if "backend" in query else None
+
+    return WebcamConfig(device_index=device_index, width=width, height=height, fps=fps, backend=backend)
 
 
 def build_webcam_url(
@@ -147,35 +181,49 @@ def build_webcam_url(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     fps: float = DEFAULT_TARGET_FPS,
+    backend: str | None = None,
 ) -> str:
     """Compose a ``webcam://`` URL from operator-supplied values."""
     if width <= 0 or height <= 0:
         raise WebcamConfigurationError("width and height must be greater than zero")
     if fps <= 0:
         raise WebcamConfigurationError("fps must be greater than zero")
-    return f"{WEBCAM_PREFIX}{int(device_index)}?width={int(width)}&height={int(height)}&fps={float(fps)}"
+    url = f"{WEBCAM_PREFIX}{int(device_index)}?width={int(width)}&height={int(height)}&fps={float(fps)}"
+    preferred = normalize_backend(backend)
+    return f"{url}&backend={preferred}" if preferred else url
 
 
-def _candidate_backends() -> list[tuple[int, str]]:
-    """Try Windows-native backends before OpenCV's automatic selection."""
+def _candidate_backends(preferred: str | None = None) -> list[tuple[int, str]]:
+    """Try Windows-native backends before OpenCV's automatic selection.
+
+    A camera-supplied ``preferred`` backend is attempted first; the remaining
+    backends keep the default order behind it, so a preference narrows the
+    probe without ever removing a working option.
+    """
     backends: list[tuple[int, str]] = []
     if hasattr(cv2, "CAP_DSHOW"):
         backends.append((cv2.CAP_DSHOW, "DSHOW"))
     if hasattr(cv2, "CAP_MSMF"):
         backends.append((cv2.CAP_MSMF, "MSMF"))
     backends.append((cv2.CAP_ANY, "ANY"))
-    return backends
+    wanted = normalize_backend(preferred)
+    if not wanted:
+        return backends
+    return [item for item in backends if item[1] == wanted] + [
+        item for item in backends if item[1] != wanted
+    ]
 
 
 def open_webcam_capture(config: WebcamConfig) -> tuple[Optional[cv2.VideoCapture], str, Optional[str]]:
     """Open a webcam device.
 
-    Returns ``(capture, backend_name, error)``. A capture is returned only when
-    the backend reports it as opened; callers must still read a frame before
-    concluding the device works.
+    Returns ``(capture, backend_name, error)``. ``backend_name`` is the backend
+    that actually opened the capture, which is not necessarily the one the
+    camera preferred. A capture is returned only when the backend reports it as
+    opened; callers must still read a frame before concluding the device works.
     """
     errors: list[str] = []
-    for backend, backend_name in _candidate_backends():
+    for backend, backend_name in _candidate_backends(config.backend):
         capture: Optional[cv2.VideoCapture] = None
         try:
             capture = cv2.VideoCapture(config.device_index, backend)
@@ -204,14 +252,16 @@ def open_webcam_capture(config: WebcamConfig) -> tuple[Optional[cv2.VideoCapture
     return None, "NONE", "; ".join(errors) or "no capture backend available"
 
 
-def probe_device(index: int, read_frame: bool = True) -> DeviceProbe:
+def probe_device(index: int, read_frame: bool = True, backend: str | None = None) -> DeviceProbe:
     """Test one device index and report only what was proven.
 
     ``available`` requires that a frame was actually read back. Opening a
     capture successfully is not evidence that a camera is present: OpenCV will
-    happily open a device index that yields nothing.
+    happily open a device index that yields nothing. ``backend`` requests a
+    preferred capture backend; the reported ``backend`` field is whichever
+    backend actually opened the capture.
     """
-    config = WebcamConfig(device_index=index)
+    config = WebcamConfig(device_index=index, backend=normalize_backend(backend))
     capture, backend, error = open_webcam_capture(config)
     if capture is None:
         return DeviceProbe(index=index, available=False, error=error, backend=backend)

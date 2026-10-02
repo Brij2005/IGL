@@ -1,0 +1,37 @@
+configuration_status: NOT_CONFIGURED
+records: []
+record_schema:
+  id: null
+  name: null
+  # EMAIL, WHATSAPP, DASHBOARD. A channel with no configured transport stays
+  # NOT_CONFIGURED and is never reported as delivered.
+  channel: null
+  # Either a direct recipient address/number or a recipient_role. Leave both
+  # null to fall back to the transport's configured default recipient list.
+  recipient: null
+  recipient_role: null
+  # Optional per-recipient event class and severity scoping.
+  event_type: null
+  severity: null
+  zone_id: null
+  dedup_window_seconds: null
+  is_enabled: null
+  # Template kind used for this recipient: INCIDENT, ESCALATION, or TEST.
+  template_kind: null
+  source_reference: null
+  approved_by: null
+  approved_at: null
+
+# Evidence retention is applied by the platform from EVIDENCE_RETENTION_DAYS and
+# EVIDENCE_DIR. The plant's intended policy is recorded here for approval and is
+# not read by the runtime.
+evidence_retention_reference:
+  configuration_status: NOT_CONFIGURED
+  retention_days: null
+  evidence_dir: null
+  # Whether frames containing identifiable people may be retained, and for how
+  # long. Left null because this is a plant decision, not a software default.
+  retain_identifiable_frames: null
+  deletion_authority: null
+  approved_by: null
+  approved_at: null

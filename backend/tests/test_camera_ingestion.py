@@ -20,7 +20,14 @@ from app.models import User, Role, Camera, CameraHealth, Event, AuditLog
 
 from app.services.camera_manager import CameraManager
 from app.services.health_monitor import health_monitor
-from app.services.video_ingestion import StreamReader, ingestion_manager
+from app.services import inference_pipeline
+from app.services.inference_pipeline import InferencePipelineManager
+from app.services.video_ingestion import (
+    RECONNECT_STATES,
+    STREAM_STATES,
+    StreamReader,
+    ingestion_manager,
+)
 from app.main import app, seed_reference_roles
 
 
@@ -116,6 +123,36 @@ def test_camera_crud_api(client, admin_auth_headers, test_db):
         "CAMERA_CREATED", "CAMERA_UPDATED", "CAMERA_DEACTIVATED"
     }
     assert all("rtsp://" not in str(entry.details_json) for entry in camera_logs)
+
+
+def test_operator_camera_start_and_stop_update_pipeline_lifecycle(client, test_db, monkeypatch):
+    """Explicit camera controls must clear/set the health worker's stop latch."""
+    camera = Camera(
+        name="Lifecycle webcam",
+        code="CAM-LIFECYCLE-01",
+        stream_url="webcam://0",
+        camera_type="WEBCAM",
+        is_active=True,
+    )
+    test_db.add(camera)
+    test_db.commit()
+    calls = []
+
+    def start_stream(camera_id, stream_url, target_fps, *, operator_start=False):
+        calls.append(("start", camera_id, stream_url, target_fps, operator_start))
+
+    def stop_stream(camera_id, *, operator_initiated=False):
+        calls.append(("stop", camera_id, operator_initiated))
+
+    monkeypatch.setattr("app.api.cameras.pipeline_manager.start_stream", start_stream)
+    monkeypatch.setattr("app.api.cameras.pipeline_manager.stop_stream", stop_stream)
+
+    assert client.post(f"/api/v1/cameras/{camera.id}/start").status_code == 200
+    assert client.post(f"/api/v1/cameras/{camera.id}/stop").status_code == 200
+    assert calls == [
+        ("start", camera.id, "webcam://0", camera.fps, True),
+        ("stop", camera.id, True),
+    ]
 
 
 def test_black_frame_detection():
@@ -245,3 +282,274 @@ def test_camera_health_telemetry_endpoint(client, admin_auth_headers, test_db):
     assert telemetry["frame_latency_ms"] is None
     assert telemetry["is_black"] is None
     assert telemetry["is_frozen"] is None
+
+
+# ===========================================================================
+# STREAM REOPEN AND RECONNECT STATE
+# ===========================================================================
+
+
+class FakeCapture:
+    """A capture handle that serves a fixed list of frames, then stalls."""
+
+    def __init__(self, frames=()):
+        self._frames = list(frames)
+        self.released = False
+        self.opened = True
+
+    def isOpened(self):
+        return self.opened
+
+    def read(self):
+        if self._frames:
+            return True, self._frames.pop(0)
+        return False, None
+
+    def get(self, _property):
+        return 0.0
+
+    def set(self, *_args):
+        return True
+
+    def release(self):
+        self.released = True
+        self.opened = False
+
+
+class BlockingCapture(FakeCapture):
+    """A capture whose read blocks, so the reader stays connected with no frame."""
+
+    def __init__(self, release_event):
+        super().__init__()
+        self._release = release_event
+
+    def read(self):
+        self._release.wait(10.0)
+        return False, None
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_reopen_states_are_declared():
+    """An undeclared state is a bug, so the reopen states must be part of the set."""
+    assert "REOPENING" in STREAM_STATES
+    assert "REOPENED" in STREAM_STATES
+
+
+def test_a_deliberately_stopped_source_stays_reopening_not_stopped(monkeypatch):
+    reader = StreamReader("cam-reopen-state", "webcam://0")
+    monkeypatch.setattr(reader, "_open_capture", lambda: FakeCapture([np.zeros((8, 8, 3), dtype=np.uint8)]))
+    reader.start()
+    try:
+        assert _wait_for(lambda: reader.is_alive())
+        reader.mark_reopening()
+        assert reader.status == "REOPENING"
+
+        reader.stop()
+
+        # A source being reopened is mid-reopen, not merely stopped, and the
+        # ordinary stop path must not overwrite that with a bare STOPPED.
+        assert reader.reopen_requested is True
+        assert reader.status == "REOPENING"
+        assert reader.status in STREAM_STATES
+    finally:
+        reader.stop()
+
+
+def test_a_reopened_source_reports_reopened_until_a_real_frame_arrives(monkeypatch):
+    """REOPENED means re-established but unobserved, not running."""
+    import threading
+
+    release = threading.Event()
+    monkeypatch.setattr(StreamReader, "_open_capture", lambda self: BlockingCapture(release))
+    reader = StreamReader("cam-reopened", "webcam://0", reopen_requested=True)
+    reader.start()
+    try:
+        assert _wait_for(lambda: reader.status == "REOPENED", timeout=5.0)
+        # The capture handle is genuinely open, but no frame has been observed
+        # from the new session, so it may not report RUNNING.
+        assert reader.is_connected is True
+        assert reader.total_frames_read == 0
+        assert reader.reopen_requested is True
+        assert reader.telemetry()["stream_state"] == "REOPENED"
+    finally:
+        release.set()
+        reader.stop(timeout=1.0)
+
+
+def test_reopen_states_clear_once_a_frame_from_the_new_session_arrives(monkeypatch):
+    monkeypatch.setattr(
+        StreamReader,
+        "_open_capture",
+        lambda self: FakeCapture([np.full((8, 8, 3), value, dtype=np.uint8) for value in (10, 40, 90)]),
+    )
+    reader = StreamReader("cam-reopened-live", "webcam://0", reopen_requested=True)
+    reader.start()
+    try:
+        assert _wait_for(lambda: reader.total_frames_read > 0, timeout=5.0)
+        assert _wait_for(lambda: reader.status == "RUNNING", timeout=5.0)
+        assert reader.reopen_requested is False
+        assert reader.status in STREAM_STATES
+    finally:
+        reader.stop()
+
+
+def test_replacing_a_live_source_marks_the_outgoing_reader_reopening(monkeypatch):
+    monkeypatch.setattr(
+        StreamReader,
+        "_open_capture",
+        lambda self: FakeCapture([np.full((8, 8, 3), value, dtype=np.uint8) for value in (10, 40, 90, 140)]),
+    )
+    try:
+        first = ingestion_manager.start_stream("cam-reopen-manager", "webcam://0")
+        assert _wait_for(lambda: first.is_alive() and first.total_frames_read > 0, timeout=5.0)
+
+        second = ingestion_manager.start_stream("cam-reopen-manager", "webcam://1")
+
+        assert first.status == "REOPENING"
+        # The replacement completes the reopen truthfully: the first frame of
+        # the new session moves it out of the reopen states and into RUNNING.
+        assert _wait_for(lambda: second.total_frames_read > 0 and second.status == "RUNNING", timeout=5.0)
+        assert second.reopen_requested is False
+    finally:
+        ingestion_manager.stop_stream("cam-reopen-manager")
+
+
+def test_reconnect_state_is_derived_from_live_reader_state():
+    reader = StreamReader("cam-reconnect-state", "rtsp://10.0.0.9/live")
+    reader.reconnect_attempts = 3
+
+    # Never opened and not waiting: nothing is being retried right now.
+    assert reader.reconnect_state() == "IDLE"
+    assert reader.reconnect_state() in RECONNECT_STATES
+
+    # A thread genuinely sleeping out its backoff interval is BACKOFF.
+    reader._running = True
+    reader._reconnect_waiting = True
+    assert reader.reconnect_state() == "BACKOFF"
+
+    # An exhausted attempt budget is terminal and stays that way.
+    reader._reconnect_waiting = False
+    reader.status = "RECONNECT_EXHAUSTED"
+    assert reader.reconnect_state() == "RECONNECT_EXHAUSTED"
+    reader._running = False
+
+
+def test_camera_status_exposes_reconnect_attempts_and_name(client, test_db, monkeypatch):
+    """The reader already counts attempts; the API has to stop dropping them."""
+    camera = Camera(
+        name="Reconnect Report Cam",
+        code="CAM-RECONNECT-01",
+        stream_url="rtsp://10.0.0.12/live",
+        is_active=True,
+    )
+    test_db.add(camera)
+    test_db.commit()
+    reader = StreamReader(camera.id, camera.stream_url)
+    reader.reconnect_attempts = 4
+    reader.reconnects = 2
+    reader.status = "RECONNECT_EXHAUSTED"
+    reader.last_error = "Reconnect attempts exhausted after 4 attempts"
+    monkeypatch.setattr("app.api.cameras.ingestion_manager.get_reader", lambda camera_id: reader)
+
+    response = client.get(f"/api/v1/cameras/{camera.id}/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["camera_name"] == "Reconnect Report Cam"
+    assert body["reconnect_attempts"] == 4
+    assert body["reconnects"] == 2
+    assert body["reconnect_state"] == "RECONNECT_EXHAUSTED"
+    assert body["reopen_in_progress"] is False
+
+
+def test_camera_status_of_a_camera_that_never_started_reports_zero_attempts(client, test_db):
+    camera = Camera(
+        name="Never Started Cam",
+        code="CAM-NEVER-STARTED-01",
+        stream_url="rtsp://10.0.0.13/live",
+        is_active=True,
+    )
+    test_db.add(camera)
+    test_db.commit()
+
+    body = client.get(f"/api/v1/cameras/{camera.id}/status").json()
+
+    assert body["reconnect_attempts"] == 0
+    assert body["reconnect_state"] == "IDLE"
+    assert body["stream_state"] == "NOT_STARTED"
+    assert body["camera_name"] == "Never Started Cam"
+
+
+# ===========================================================================
+# OPERATOR STOP INTENT
+# ===========================================================================
+
+
+def test_operator_stop_intent_survives_a_backend_restart(monkeypatch, tmp_path):
+    """A camera an operator stopped must not be resumed by the health worker."""
+    marker = tmp_path / "camera_operator_stops.json"
+    monkeypatch.setattr(inference_pipeline, "operator_stop_marker_path", lambda: marker)
+
+    running = InferencePipelineManager()
+    assert running.is_operator_stopped("cam-operator-stop") is False
+
+    running.record_operator_stop("cam-operator-stop")
+
+    assert marker.is_file()
+    assert running.is_operator_stopped("cam-operator-stop") is True
+    # A brand new manager stands in for a restarted backend process.
+    restarted = InferencePipelineManager()
+    assert restarted.is_operator_stopped("cam-operator-stop") is True
+
+    # An operator start is the only thing that clears the intent.
+    restarted.clear_operator_stop("cam-operator-stop")
+    assert inference_pipeline.load_operator_stop_markers() == {}
+    assert InferencePipelineManager().is_operator_stopped("cam-operator-stop") is False
+
+
+def test_operator_stop_marker_holds_no_configuration(monkeypatch, tmp_path):
+    """The marker records a decision, never a stream URL or a credential."""
+    marker = tmp_path / "camera_operator_stops.json"
+    monkeypatch.setattr(inference_pipeline, "operator_stop_marker_path", lambda: marker)
+
+    manager = InferencePipelineManager()
+    manager.record_operator_stop("cam-marker-content")
+
+    payload = inference_pipeline.load_operator_stop_markers()
+    assert set(payload) == {"cam-marker-content"}
+    assert "rtsp://" not in marker.read_text(encoding="utf-8")
+    assert payload["cam-marker-content"].endswith("+00:00")
+
+
+def test_a_corrupt_marker_file_does_not_prevent_startup(monkeypatch, tmp_path):
+    """Losing a stop record is bad; refusing to start because of it is worse."""
+    marker = tmp_path / "camera_operator_stops.json"
+    marker.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(inference_pipeline, "operator_stop_marker_path", lambda: marker)
+
+    assert inference_pipeline.load_operator_stop_markers() == {}
+    assert InferencePipelineManager().is_operator_stopped("cam-any") is False
+
+
+def test_shutdown_does_not_erase_recorded_operator_stops(monkeypatch, tmp_path):
+    """A backend restart is not an operator decision about any camera."""
+    marker = tmp_path / "camera_operator_stops.json"
+    monkeypatch.setattr(inference_pipeline, "operator_stop_marker_path", lambda: marker)
+    monkeypatch.setattr(
+        inference_pipeline.ingestion_manager, "stop_all", lambda: None, raising=False
+    )
+
+    manager = InferencePipelineManager()
+    manager.record_operator_stop("cam-keep-stopped")
+    manager.stop_all()
+
+    assert manager.is_operator_stopped("cam-keep-stopped") is True
+    assert InferencePipelineManager().is_operator_stopped("cam-keep-stopped") is True

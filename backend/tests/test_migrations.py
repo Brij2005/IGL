@@ -35,6 +35,8 @@ DOMAIN_TABLES = {
     "detector_configs", "safety_rules", "operating_thresholds",
     "escalation_policies", "event_escalations", "event_correlations",
     "notification_policies",
+    # Alarm subsystem, added in b2a5c8e4f701.
+    "alarms", "alarm_state_transitions",
 }
 BASE_REVISION = "e822fa83c9db"
 DOMAIN_TABLE_COUNT = len(DOMAIN_TABLES)

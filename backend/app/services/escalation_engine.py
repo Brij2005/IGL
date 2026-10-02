@@ -142,10 +142,40 @@ def evaluate_event_escalation(db: Session, event: Event, now: datetime | None = 
             for escalation in created
         ]
         report["status"] = "ESCALATED"
+        report["alarm_escalations"] = _escalate_linked_alarms(db, event, report)
     else:
         report["status"] = "NOT_DUE"
 
     return report
+
+
+def _escalate_linked_alarms(db: Session, event: Event, report: dict) -> list:
+    """Move the alarms of a persisted event to ESCALATED, if any are live.
+
+    The alarm follows the event: an event that nobody handled inside its policy
+    window also raises the alarm to the next response tier. Alarms that are
+    already acknowledged or cleared are left alone.
+    """
+    from app.services import alarm_engine
+
+    moved = []
+    try:
+        live_alarms = alarm_engine.active_alarms(db, limit=500)
+    except Exception:  # noqa: BLE001 - alarm bookkeeping must not break escalation
+        return moved
+    for alarm in live_alarms:
+        if alarm.event_id != event.id or alarm.state != "ACTIVE":
+            continue
+        try:
+            alarm_engine.escalate_alarm(
+                db,
+                alarm,
+                reason=f"Event escalation level {max(item['escalation_level'] for item in report['escalations_created'])} fired for event {event.id}",
+            )
+            moved.append(alarm.id)
+        except alarm_engine.InvalidAlarmTransition:  # pragma: no cover - defensive
+            continue
+    return moved
 
 
 def pending_escalations(db: Session, now: datetime | None = None) -> List[EventEscalation]:
@@ -164,14 +194,44 @@ def acknowledge_escalation(
     user: User | None,
     now: datetime | None = None,
 ) -> EventEscalation:
-    """Record that a named user took responsibility for an escalation."""
+    """Record that a named user took responsibility for an escalation.
+
+    Any live alarm raised from the same event is acknowledged in the same action,
+    so the alarm board cannot keep sounding after somebody has taken the
+    escalation.
+    """
     if escalation.acknowledged_at is not None:
         return escalation
     escalation.acknowledged_at = _as_utc(now) or datetime.now(timezone.utc)
     escalation.acknowledged_by_user_id = user.id if user else None
     db.commit()
     db.refresh(escalation)
+    _acknowledge_linked_alarms(db, escalation, user)
     return escalation
+
+
+def _acknowledge_linked_alarms(db: Session, escalation: EventEscalation, user: User | None) -> list:
+    from app.services import alarm_engine
+
+    acknowledged = []
+    try:
+        alarms = alarm_engine.active_alarms(db, limit=500)
+    except Exception:  # noqa: BLE001 - a session without the alarm subsystem must not block an escalation ack
+        return acknowledged
+    for alarm in alarms:
+        if alarm.event_id != escalation.event_id:
+            continue
+        try:
+            alarm_engine.acknowledge_alarm(
+                db,
+                alarm,
+                user_id=user.id if user else None,
+                notes=f"Acknowledged with escalation {escalation.id}",
+            )
+            acknowledged.append(alarm.id)
+        except alarm_engine.AlarmPreconditionError:  # pragma: no cover - defensive
+            continue
+    return acknowledged
 
 
 def notification_targets(db: Session, event: Event) -> List[NotificationPolicy]:

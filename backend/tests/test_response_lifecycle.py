@@ -171,6 +171,33 @@ def test_incident_rejects_unknown_and_self_transitions(db_session):
     assert db_session.query(IncidentStateTransition).count() == 0
 
 
+def test_incident_escalation_is_recorded_and_can_still_be_worked(db_session):
+    incident = create_incident(db_session)
+    transition_incident(db_session, incident, "ESCALATED", user_id=None, reason="fixture escalated to the plant manager")
+    assert incident.status == "ESCALATED"
+    # Escalation is not terminal: the incident can still be worked and closed.
+    transition_incident(db_session, incident, "INVESTIGATING", user_id=None, reason="fixture investigation started")
+    transition_incident(db_session, incident, "RESOLVED", user_id=None, reason="fixture resolved")
+    assert incident.status == "RESOLVED"
+    history = db_session.query(IncidentStateTransition).filter_by(incident_id=incident.id).all()
+    assert [item.new_state for item in history] == ["ESCALATED", "INVESTIGATING", "RESOLVED"]
+    assert all(item.transitioned_at is not None for item in history)
+
+
+def test_incident_cancellation_is_terminal_and_always_reasoned(db_session):
+    incident = create_incident(db_session)
+    transition_incident(db_session, incident, "INVESTIGATING", user_id=None, reason="fixture start")
+    # A withdrawn incident still needs the reason it was withdrawn.
+    with pytest.raises(InvalidStateTransition, match="reason is required"):
+        transition_incident(db_session, incident, "CANCELLED", user_id=None, reason=" ")
+    transition_incident(db_session, incident, "CANCELLED", user_id=None, reason="fixture raised in error")
+    for state in ("OPEN", "INVESTIGATING", "ESCALATED", "RESOLVED", "CLOSED"):
+        with pytest.raises(InvalidStateTransition, match="not allowed"):
+            transition_incident(db_session, incident, state, user_id=None, reason="reopen a withdrawal")
+    assert incident.status == "CANCELLED"
+    assert db_session.query(IncidentStateTransition).count() == 2
+
+
 # ---------------------------------------------------------------------------
 # NEAR-MISS LIFECYCLE
 # ---------------------------------------------------------------------------
@@ -399,12 +426,12 @@ def test_lifecycle_states_are_published(client):
     response = client.get("/api/v1/lifecycle-states")
     assert response.status_code == 200
     body = response.json()
-    assert body["incident"] == ["CLOSED", "INVESTIGATING", "OPEN", "RESOLVED"]
+    assert body["incident"] == ["CANCELLED", "CLOSED", "ESCALATED", "INVESTIGATING", "OPEN", "RESOLVED"]
     assert "CONFIRMED" in body["near_miss"]
     assert body["corrective_action"] == ["CLOSED", "IN_PROGRESS", "PENDING", "VERIFIED"]
     assert set(body["event"]) == {
-        "NEW", "UNACKNOWLEDGED", "ACKNOWLEDGED", "ASSIGNED",
-        "UNDER_INVESTIGATION", "ACTION_REQUIRED", "RESOLVED", "CLOSED",
+        "NEW", "UNACKNOWLEDGED", "ESCALATED", "ACKNOWLEDGED", "ASSIGNED",
+        "UNDER_INVESTIGATION", "ACTION_REQUIRED", "RESOLVED", "CANCELLED", "CLOSED",
     }
 
 
@@ -423,7 +450,7 @@ def test_incident_api_requires_an_existing_event(client, db_session):
     assert created.status_code == 201
     body = created.json()
     assert body["status"] == "OPEN"
-    assert body["allowed_transitions"] == ["INVESTIGATING", "RESOLVED"]
+    assert body["allowed_transitions"] == ["CANCELLED", "ESCALATED", "INVESTIGATING", "RESOLVED"]
 
     moved = client.post(
         f"/api/v1/incidents/{body['id']}/transitions",

@@ -3,7 +3,7 @@
 const API_STORAGE_KEY = "iglSafetyApiBase";
 const AUTH_TOKEN_KEY = "iglSafetyAccessToken";
 const DEFAULT_API = "http://127.0.0.1:8000/api/v1";
-const ALARM_EVENT_TYPES = new Set(["FIRE", "SMOKE", "RESTRICTED_ZONE_INTRUSION"]);
+const WORKER_UNSUPPORTED_DETECTORS = [["helmet_status", "HELMET"], ["ppe_status", "PPE"], ["phone_status", "PHONE"]];
 const labels = {
   overview: ["OPERATIONS / CURRENT STATE", "Overview"],
   cameras: ["MONITOR / INPUTS", "Cameras"],
@@ -30,7 +30,7 @@ let apiBase = sanitizedApiBase;
 let authToken = sessionStorage.getItem(AUTH_TOKEN_KEY);
 let eventsCache = [];
 let currentView = "overview";
-let activeAlarmEvents = [];
+let activeAlarmsState = [];
 let alarmPollingTimer = null;
 let alarmSoundTimer = null;
 let alarmAudioContext = null;
@@ -44,6 +44,7 @@ let webcamPollingTimer = null;
 let webcamPreviewTimer = null;
 let webcamPreviewInFlight = false;
 let webcamPreviewObjectUrl = null;
+let webcamPreviewController = null;
 let webcamBusy = false;
 let webcamCameraError = null;
 let currentIdentity = null;
@@ -51,6 +52,9 @@ let browserCameraStream = null;
 let browserCameraFrames = 0;
 let browserCameraFrameStartedAt = 0;
 let browserCameraFrameHandle = null;
+let workersPollingTimer = null;
+let workersRequestInFlight = false;
+let workersRequestController = null;
 
 const appShell = document.querySelector("#app-shell");
 const loginShell = document.querySelector("#login-shell");
@@ -100,6 +104,14 @@ async function request(path, options = {}) {
   return response.json();
 }
 
+async function optionalRequest(path, fallback) {
+  try {
+    return await request(path);
+  } catch {
+    return fallback;
+  }
+}
+
 function unavailableMarkup() {
   return `<section class="section"><div class="section-head"><h2>Current capability state</h2><span>REAL SYSTEM STATE</span></div><div class="section-body unavailable-grid">
     <div class="unavailable-item"><strong>AI model</strong>MODEL_NOT_CONFIGURED</div>
@@ -121,6 +133,86 @@ function stateRows(items) {
   return `<div class="state-list">${items.map(([name, value]) => `<div class="state-row"><span>${escapeHtml(name)}</span><span class="state-value">${escapeHtml(value ?? "NOT_AVAILABLE")}</span></div>`).join("")}</div>`;
 }
 
+const BAD_STATE_PATTERN = /(_FAILED|_FAILURE|_ERROR|UNAVAILABLE|UNREACHABLE|NOT_CONNECTED|NOT_IMPLEMENTED|INSUFFICIENT|DEGRADED|UNSUPPORTED|NOT_PERMITTED|NO_PERMISSION)/;
+const WARN_STATE_PATTERN = /(NOT_[A-Z_]+|UNKNOWN|UNVERIFIED|UNCONFIRMED|PENDING|SUPPRESSED|EXPIRED|STALE|PAUSED|DISABLED|IDLE|OFFLINE|WAITING|CHECKING|QUEUED|RETRYING|STOPPED|NOT_STARTED|LOW$|^LOW|ATTEMPTED|CONFIGURED_NOT|SIMULAT)/;
+const POSITIVE_STATE_VALUES = new Set([
+  "APPLICATION_UP", "DATABASE_OK", "MIGRATIONS_CURRENT", "MODEL_CONFIGURED", "CAMERA_AVAILABLE",
+  "DISK_OK", "EMAIL_CONFIGURED", "WHATSAPP_CONFIGURED", "ALARM_READY_EVENT_DRIVEN", "READY",
+  "ENABLED", "CONFIGURED", "SENT", "DELIVERED", "OPERATIONAL", "MEASURED", "RUNNING",
+  "ACTIVATED", "MEASURED_FROM_OBSERVED_FRAMES",
+]);
+
+function stateTone(state) {
+  const value = String(state ?? "").trim().toUpperCase();
+  if (!value) return "unknown";
+  if (BAD_STATE_PATTERN.test(value)) return "bad";
+  if (POSITIVE_STATE_VALUES.has(value)) return "good";
+  if (WARN_STATE_PATTERN.test(value)) return "warn";
+  return "neutral";
+}
+
+function stateText(value, fallback = "NOT_AVAILABLE") {
+  if (value === null || value === undefined || value === "" || value === false) return fallback;
+  return String(value);
+}
+
+function stateBadge(value, fallback = "NOT_AVAILABLE") {
+  const text = stateText(value, fallback);
+  return `<span class="state-badge tone-${stateTone(text)}">${escapeHtml(text)}</span>`;
+}
+
+function badgeRow(label, value, fallback = "NOT_AVAILABLE") {
+  return `<div class="state-row"><span>${escapeHtml(label)}</span><span class="state-value">${stateBadge(value, fallback)}</span></div>`;
+}
+
+function formatCount(value) {
+  return Number.isFinite(Number(value)) && value !== null && value !== undefined ? Number(value).toLocaleString() : "NOT_AVAILABLE";
+}
+
+function formatFps(value) {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} fps` : "NOT_MEASURED";
+}
+
+function formatUptime(health) {
+  const seconds = Number(health?.uptime_seconds);
+  if (health?.uptime_human) return String(health.uptime_human);
+  return Number.isFinite(seconds) ? `${Math.round(seconds)}s` : "NOT_AVAILABLE";
+}
+
+function formatTransportList(value) {
+  if (Array.isArray(value) && value.length) return value.join(", ");
+  return "NONE_CONFIGURED";
+}
+
+function detectorMap(detectorHealth) {
+  const map = new Map();
+  for (const item of detectorHealth?.detectors || []) map.set(item.detector_key, item);
+  return map;
+}
+
+function detectorState(detectors, key) {
+  return detectors.get(key)?.availability_state || "NOT_AVAILABLE";
+}
+
+function detectorImplementation(detectors, key) {
+  return detectors.get(key)?.implementation_state || "NOT_AVAILABLE";
+}
+
+function unsupportedVerdict(value, detectorKey, detectors) {
+  const reported = String(value ?? "").trim().toUpperCase();
+  if (!reported || reported === "SAFE" || reported === "OK" || reported === "COMPLIANT" || reported === "NO_VIOLATION" || reported === "NONE" || reported === "CLEAR") {
+    return { label: "UNKNOWN", note: `${detectorKey} is ${detectorImplementation(detectors, detectorKey)}; absence and compliance verdicts are not produced` };
+  }
+  if (reported.startsWith("NOT_") || reported === "MODEL_NOT_CONFIGURED") {
+    return { label: reported, note: "Backend reported capability state" };
+  }
+  return { label: reported, note: "Verdict reported by the backend record" };
+}
+
+function metricBadge(label, value, badgeValue, note = "From backend records", fallback = "NOT_AVAILABLE") {
+  return `<article class="metric"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-note">${stateBadge(badgeValue, fallback)}</div><div class="metric-note-text">${escapeHtml(note)}</div></article>`;
+}
+
 function statusBanner(health, summary) {
   const status = health?.overall_status || "NOT_AVAILABLE";
   const model = health?.model_state || "MODEL_NOT_CONFIGURED";
@@ -134,40 +226,100 @@ function statusBanner(health, summary) {
 }
 
 async function renderOverview() {
-  const [summary, health, cameras, events, incidents, notifications, channels] = await Promise.all([
+  const [summary, health, events, incidents, notifications, channels, tracks, detectorHealth, alarmPolicy, activeAlarms] = await Promise.all([
     request("/analytics/summary"),
     request("/system/health"),
-    request("/cameras?active_only=true"),
-    request("/events?limit=100&offset=0"),
-    request("/incidents?limit=5&offset=0"),
+    request("/events?limit=500&offset=0"),
+    request("/incidents?limit=200&offset=0"),
     request("/notifications?limit=5&offset=0"),
     request("/notifications/channels/status"),
+    request("/workers/tracks?recent_only=true&recent_within_seconds=30&limit=500"),
+    request("/system/detectors"),
+    request("/alarms/policy"),
+    request("/alarms?active_only=true&limit=100"),
   ]);
   eventsCache = events;
-  const latest = [...events].slice(0, 5);
+  const detectors = detectorMap(detectorHealth);
+  const latest = events.slice(0, 5);
+  const activeAlarmRows = activeAlarms;
+  const confirmedEventIds = new Set(events.filter((event) => event.observation_state === "CONFIRMED").map((event) => event.id));
+  const confirmedIncidents = incidents.filter((incident) => incident.event_id && confirmedEventIds.has(incident.event_id));
+  const activeIncidents = incidents.filter((incident) => !["CLOSED", "RESOLVED", "CANCELLED"].includes(incident.status));
+  const lastIncident = incidents[0] || null;
+  const lastNotification = notifications[0] || null;
+  const confirmedByType = (types) => events.filter((event) => types.includes(event.event_type) && event.observation_state === "CONFIRMED").length;
+  const notificationDelivery = (item) => item?.delivery_status || item?.last_delivery_status || item?.status || "NOT_AVAILABLE";
   content.innerHTML = `${statusBanner(health, summary)}
     <div class="metrics-grid">
-      ${metric("Configured cameras", summary.camera_count)}
-      ${metric("Online cameras", summary.online_camera_count)}
-      ${metric("Recorded events", summary.event_count)}
-      ${metric("Incidents", summary.incident_count)}
+      ${metric("Configured cameras", formatCount(summary.camera_count))}
+      ${metric("Online cameras", formatCount(summary.online_camera_count))}
+      ${metric("Active incidents", formatCount(activeIncidents.length), "Backend records · latest 200")}
+      ${metric("Confirmed incidents", formatCount(confirmedIncidents.length), "Incidents linked to confirmed events · latest 500 events")}
+      ${metricBadge("Active software alarms", formatCount(alarmPolicy.active_alarm_count), alarmPolicy.alarm_policy_enabled ? "ALARM_READY_EVENT_DRIVEN" : "ALARM_DISABLED_BY_POLICY", "Live alarm board · GET /alarms/policy")}
+      ${metricBadge("System uptime", formatUptime(health), health.uptime_state || "UPTIME_UNAVAILABLE", "Measured process uptime reported by the backend")}
+      ${metricBadge("Camera FPS", formatFps(health.camera_fps), health.measured_performance || "NOT_MEASURED", "Only measured from observed frames", "NOT_MEASURED")}
+      ${metricBadge("Inference FPS", formatFps(health.inference_fps), health.measured_performance || "NOT_MEASURED", "Only measured from completed inferences", "NOT_MEASURED")}
+      ${metricBadge("Disk", health.disk_free_percent === null || health.disk_free_percent === undefined ? "NOT_AVAILABLE" : `${health.disk_free_percent}% free`, health.disk_state || "DISK_UNAVAILABLE", "Free space on the evidence/database volume")}
+      ${metricBadge("Email transport", health.email_transport || "EMAIL_NOT_CONFIGURED", health.email_transport || "EMAIL_NOT_CONFIGURED", "Configuration state only; delivery is reported per notification", "EMAIL_NOT_CONFIGURED")}
+      ${metricBadge("WhatsApp transport", health.whatsapp_transport || "WHATSAPP_NOT_CONFIGURED", health.whatsapp_transport || "WHATSAPP_NOT_CONFIGURED", "Configuration state only; delivery is reported per notification", "WHATSAPP_NOT_CONFIGURED")}
+      ${metricBadge("Physical alarm", health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED", health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED", `Configured transports: ${formatTransportList(health.physical_alarm_transports)}`, "PHYSICAL_ALARM_NOT_CONFIGURED")}
+      ${metric("Recently observed tracks", formatCount(tracks.length), "Persisted tracks · last 30 seconds")}
+      ${metricBadge("Helmet detection", detectorImplementation(detectors, "HELMET"), detectorState(detectors, "HELMET"), "Backend detector implementation and availability state")}
+      ${metricBadge("Phone-use detection", detectorImplementation(detectors, "PHONE"), detectorState(detectors, "PHONE"), "Backend detector implementation and availability state")}
+      ${metric("PPE event records", formatCount(confirmedByType(["PPE_NON_COMPLIANCE"])), "Confirmed records among latest 500 events")}
+      ${metric("Fire / smoke events", formatCount(confirmedByType(["FIRE", "SMOKE"])), "Confirmed persisted events")}
+      ${metric("Recorded events", formatCount(summary.event_count))}
+    </div>
+    <div class="metrics-grid alarm-count-grid">
+      ${metric("Total alarms raised", formatCount(alarmPolicy.total_alarms), "Persisted alarm records · GET /alarms/policy")}
+      ${metric("Active alarms", formatCount(alarmPolicy.active_alarm_count), "Live board · GET /alarms/policy")}
+      ${metric("Escalated alarms", formatCount(alarmPolicy.escalated_alarm_count), "Escalation worker state · GET /alarms/policy")}
+      ${metric("Acknowledged alarms", formatCount(alarmPolicy.acknowledged_alarm_count), "GET /alarms/policy")}
+      ${metric("Suppressed alarms", formatCount(alarmPolicy.suppressed_alarm_count), "Cooldown and repeat limit · GET /alarms/policy")}
+      ${metric("Expired alarms", formatCount(alarmPolicy.expired_alarm_count), "Auto-expire policy · GET /alarms/policy")}
+      ${metric("Cleared alarms", formatCount(alarmPolicy.cleared_alarm_count), "Operator or policy cleared · GET /alarms/policy")}
     </div>
     <div class="content-grid">
       <section class="section"><div class="section-head"><h2>Recent recorded events</h2><span>DATABASE RECORDS</span></div>
         ${latest.length ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th>State</th><th>Workflow</th><th>Started</th></tr></thead><tbody>${latest.map(eventRow).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No events recorded.</strong>Nothing is generated to fill this view.</div></div>`}
       </section>
-      <section class="section"><div class="section-head"><h2>Subsystems</h2><span>REPORTED STATE</span></div><div class="section-body">${stateRows([
-        ["Application process", health.application], ["Database", health.database], ["Migrations", health.migrations],
-        ["Cameras", health.camera_state], ["Camera health worker", health.camera_health_worker],
-        ["Inference", health.inference_pipeline], ["Model", health.model_state],
-        ["Evidence", health.evidence_subsystem], ["Notifications", health.notification_subsystem],
-        ["Frontend connectivity", health.frontend_connectivity], ["Measured performance", health.measured_performance],
-        ["Accuracy", summary.accuracy_metrics_status],
-      ])}</div></section>
+      <section class="section"><div class="section-head"><h2>Latest incident and notification</h2><span>LAST RECORDED VALUE</span></div><div class="section-body"><div class="state-list">
+        ${badgeRow("Last incident", lastIncident ? `${lastIncident.status} · ${lastIncident.id.slice(0, 8)}` : "NO_INCIDENT_RECORDED", "NO_INCIDENT_RECORDED")}
+        ${badgeRow("Last incident time", lastIncident ? formatDate(lastIncident.created_at) : "NOT_AVAILABLE", "NOT_AVAILABLE")}
+        ${badgeRow("Last notification channel", lastNotification ? lastNotification.channel : "NO_NOTIFICATION_RECORDED", "NO_NOTIFICATION_RECORDED")}
+        ${badgeRow("Last notification time", lastNotification ? formatDate(lastNotification.sent_at || lastNotification.created_at) : "NOT_AVAILABLE", "NOT_AVAILABLE")}
+        ${badgeRow("Last delivery status", lastNotification ? notificationDelivery(lastNotification) : "NOT_AVAILABLE", "NOT_AVAILABLE")}
+      </div></div></section>
+    </div>
+    <div class="content-grid">
+      <section class="section"><div class="section-head"><h2>Active alarm board</h2><span>GET /alarms?active_only=true</span></div>${activeAlarmRows.length ? `<div class="table-wrap"><table><thead><tr><th>Alarm</th><th>Severity</th><th>State</th><th>Raised</th><th>Physical</th></tr></thead><tbody>${activeAlarmRows.map((alarm) => `<tr><td class="mono">${escapeHtml(alarm.id.slice(0, 10))}</td><td>${escapeHtml(alarm.severity)}</td><td>${stateBadge(alarm.state)}</td><td>${escapeHtml(formatDate(alarm.raised_at))}</td><td>${stateBadge(alarm.physical_state, "NOT_ATTEMPTED")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>NO_ACTIVE_ALARMS</strong>The live board returned ${activeAlarmRows.length} active or escalated alarms.</div></div>`}</section>
+      <section class="section"><div class="section-head"><h2>Subsystems</h2><span>REPORTED STATE</span></div><div class="section-body"><div class="state-list">
+        ${badgeRow("Application process", health.application)}
+        ${badgeRow("Uptime", health.uptime_state || "UPTIME_UNAVAILABLE")}
+        ${badgeRow("Database", health.database)}
+        ${badgeRow("Migrations", health.migrations)}
+        ${badgeRow("Cameras", health.camera_state)}
+        ${badgeRow("Camera health worker", health.camera_health_worker)}
+        ${badgeRow("Safety / escalation worker", health.safety_event_worker || "UNKNOWN")}
+        ${badgeRow("Notification delivery worker", health.notification_delivery_worker || "UNKNOWN")}
+        ${badgeRow("Alarm subsystem", health.alarm_subsystem || "UNKNOWN")}
+        ${badgeRow("Physical alarm state", health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED", "PHYSICAL_ALARM_NOT_CONFIGURED")}
+        ${badgeRow("Physical alarm transports", formatTransportList(health.physical_alarm_transports), "NONE_CONFIGURED")}
+        ${badgeRow("Inference", health.inference_pipeline)}
+        ${badgeRow("Model", health.model_state)}
+        ${badgeRow("Evidence", health.evidence_subsystem)}
+        ${badgeRow("Notifications", health.notification_subsystem)}
+        ${badgeRow("Disk", health.disk_state || "DISK_UNAVAILABLE")}
+        ${badgeRow("Email transport", health.email_transport || "EMAIL_NOT_CONFIGURED", "EMAIL_NOT_CONFIGURED")}
+        ${badgeRow("WhatsApp transport", health.whatsapp_transport || "WHATSAPP_NOT_CONFIGURED", "WHATSAPP_NOT_CONFIGURED")}
+        ${badgeRow("Measured performance", health.measured_performance || "NOT_MEASURED", "NOT_MEASURED")}
+        ${badgeRow("Frontend connectivity", health.frontend_connectivity)}
+        ${badgeRow("Accuracy", summary.accuracy_metrics_status)}
+      </div></div></section>
     </div>`;
   content.insertAdjacentHTML("beforeend", `<div class="content-grid operational-records">
-    <section class="section"><div class="section-head"><h2>Recent incidents</h2><span>DATABASE RECORDS</span></div>${incidents.length ? `<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Severity</th><th>Status</th><th>Created</th></tr></thead><tbody>${incidents.map((incident) => `<tr><td>${escapeHtml(incident.title)}</td><td>${escapeHtml(incident.severity)}</td><td>${escapeHtml(incident.status)}</td><td>${escapeHtml(formatDate(incident.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No incident records.</strong>Incidents require an existing event and operator action.</div></div>`}</section>
-    <section class="section"><div class="section-head"><h2>Notification state</h2><span>PROVIDER ACCEPTANCE IS NOT READ RECEIPT</span></div><div class="section-body">${stateRows(channels.map((channel) => [channel.channel, `${channel.configuration_state} · QUEUED ${channel.queued} · SENT ${channel.sent} · FAILED ${channel.failed}`]))}</div>${notifications.length ? `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>State</th><th>Recipient</th><th>Updated</th></tr></thead><tbody>${notifications.map((item) => `<tr><td>${escapeHtml(item.channel)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(maskedRecipient(item.recipient_role || item.recipient))}</td><td>${escapeHtml(formatDate(item.sent_at || item.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No notifications queued.</strong>Event notification policies create rows when a supported event is confirmed.</div></div>`}</section>
+    <section class="section"><div class="section-head"><h2>Recent incidents</h2><span>DATABASE RECORDS</span></div>${incidents.length ? `<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Severity</th><th>Status</th><th>Created</th></tr></thead><tbody>${incidents.slice(0, 25).map((incident) => `<tr><td>${escapeHtml(incident.title)}</td><td>${escapeHtml(incident.severity)}</td><td>${stateBadge(incident.status)}</td><td>${escapeHtml(formatDate(incident.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No incident records.</strong>Incidents require an existing event and operator action.</div></div>`}</section>
+    <section class="section"><div class="section-head"><h2>Notification state</h2><span>PROVIDER ACCEPTANCE IS NOT READ RECEIPT</span></div><div class="section-body"><div class="state-list">${channels.map((channel) => `<div class="state-row"><span>${escapeHtml(channel.channel)}</span><span class="state-value">${stateBadge(channel.configuration_state)}${channel.delivery_status || channel.last_delivery_status ? ` ${stateBadge(channel.delivery_status || channel.last_delivery_status)}` : ""} · QUEUED ${escapeHtml(formatCount(channel.queued))} · SENT ${escapeHtml(formatCount(channel.sent))} · FAILED ${escapeHtml(formatCount(channel.failed))}</span></div>`).join("")}</div></div>${notifications.length ? `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>Delivery status</th><th>Recipient</th><th>Updated</th></tr></thead><tbody>${notifications.map((item) => `<tr><td>${escapeHtml(item.channel)}</td><td>${stateBadge(notificationDelivery(item))}</td><td>${escapeHtml(maskedRecipient(item.recipient_role || item.recipient))}</td><td>${escapeHtml(formatDate(item.sent_at || item.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No notifications queued.</strong>Event notification policies create rows when a supported event is confirmed.</div></div>`}</section>
   </div>`);
   setApiIndicator(health.overall_status, health.overall_status);
 }
@@ -263,6 +415,8 @@ function stopWebcamPreview() {
     window.clearTimeout(webcamPreviewTimer);
     webcamPreviewTimer = null;
   }
+  webcamPreviewController?.abort();
+  webcamPreviewController = null;
   const image = document.querySelector("#webcam-preview-image");
   if (image) {
     image.removeAttribute("src");
@@ -273,12 +427,15 @@ function stopWebcamPreview() {
 }
 
 async function refreshWebcamPreview() {
-  if (currentView !== "cameras" || !document.querySelector("#webcam-preview-image") || !canViewBackendPreview() || !webcamIsOnline() || webcamPreviewInFlight) return;
+  if (currentView !== "cameras" || !document.querySelector("#webcam-preview-image") || !canViewBackendPreview() || !webcamIsOnline() || webcamBusy || webcamPreviewInFlight) return;
   webcamPreviewInFlight = true;
+  const controller = new AbortController();
+  webcamPreviewController = controller;
   try {
     const response = await fetch(`${apiBase}/cameras/${encodeURIComponent(webcamCamera.id)}/snapshot.jpg`, {
       headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
       cache: "no-store",
+      signal: controller.signal,
     });
     if (!response.ok) {
       let detail = `Authenticated camera snapshot failed (${response.status})`;
@@ -298,8 +455,9 @@ async function refreshWebcamPreview() {
     image.hidden = false;
     empty.hidden = true;
   } catch (error) {
-    handleWebcamPreviewError(error.message);
+    if (error.name !== "AbortError") handleWebcamPreviewError(error.message);
   } finally {
+    if (webcamPreviewController === controller) webcamPreviewController = null;
     webcamPreviewInFlight = false;
     if (currentView === "cameras" && document.querySelector("#webcam-preview-image") && canViewBackendPreview() && webcamIsOnline()) webcamPreviewTimer = window.setTimeout(refreshWebcamPreview, 250);
   }
@@ -531,6 +689,7 @@ function transitionButton(event) {
     ASSIGNED: "UNDER_INVESTIGATION", UNDER_INVESTIGATION: "ACTION_REQUIRED", ACTION_REQUIRED: "RESOLVED", RESOLVED: "CLOSED",
   };
   const next = choices[event.workflow_state];
+  if (currentIdentity && !["ADMIN", "SAFETY_OFFICER"].includes(currentIdentity.role?.name)) return "VIEW ONLY";
   return next ? `<button class="inline-button" data-event="${escapeHtml(event.id)}" data-transition="${next}">Move to ${escapeHtml(next)}</button>` : "-";
 }
 
@@ -555,12 +714,83 @@ function maskedRecipient(value) {
 }
 
 async function renderWorkers() {
-  content.innerHTML = `<section class="section"><div class="section-head"><h2>Live worker monitoring</h2><span>TRACK IDS ARE VISUAL SESSIONS, NOT IDENTITIES</span></div><div class="empty-state"><div><strong>WORKER TRACKS NOT EXPOSED BY CURRENT API</strong>The database has track records, but there is no authorized live tracks endpoint. Helmet and phone-use results are UNKNOWN; no workers or safety states are inferred here.</div></div></section>
-    <section class="section"><div class="section-head"><h2>Detector capability</h2><span>BACKEND MODEL HEALTH</span></div><div class="section-body" id="worker-capability">Loading model capability…</div></section>`;
+  if (workersRequestInFlight) return false;
+  workersRequestInFlight = true;
+  const controller = new AbortController();
+  workersRequestController = controller;
   try {
-    const health = await request("/system/ai-health"); const model = health.model || {};
-    document.querySelector("#worker-capability").innerHTML = stateRows([["Model", model.status || "UNKNOWN"], ["Weights", model.weights_loaded ? "LOADED" : "MODEL_NOT_CONFIGURED"], ["Supported classes", (model.classes || []).join(", ") || "NOT_AVAILABLE"], ["Phone-use capability", "NOT_CONFIGURED"]]);
-  } catch (error) { document.querySelector("#worker-capability").textContent = error.message; }
+    const [tracks, health, detectorHealth, events] = await Promise.all([
+      request("/workers/tracks?recent_only=true&recent_within_seconds=30&limit=100", { signal: controller.signal }),
+      request("/system/ai-health", { signal: controller.signal }),
+      request("/system/detectors", { signal: controller.signal }),
+      optionalRequest("/events?limit=200&offset=0", []),
+    ]);
+    if (currentView !== "workers") return true;
+    const model = health.model || {};
+    const detectors = detectorMap(detectorHealth);
+    const incidentsByTrack = new Map();
+    for (const event of events) {
+      if (!event.track_uuid) continue;
+      const linked = Array.isArray(event.incident_ids) && event.incident_ids.length ? event.incident_ids : null;
+      if (!linked) continue;
+      const existing = incidentsByTrack.get(event.track_uuid) || new Set();
+      for (const incidentId of linked) existing.add(incidentId);
+      incidentsByTrack.set(event.track_uuid, existing);
+    }
+    const cards = tracks.map((track) => {
+      const active = track.active_events || [];
+      const last = track.latest_detection;
+      const trackIncidents = Array.from(incidentsByTrack.get(track.track_id) || []);
+      const unsupported = WORKER_UNSUPPORTED_DETECTORS.map(([field, key]) => {
+        const verdict = unsupportedVerdict(track[field], key, detectors);
+        return `<div class="state-row"><span>${escapeHtml(key)}</span><span class="state-value">${stateBadge(verdict.label, "UNKNOWN")}</span></div><div class="state-note">${escapeHtml(verdict.note)}</div>`;
+      }).join("");
+      return `<article class="section worker-card"><div class="section-head"><h2>TRACK ${escapeHtml(track.track_id)}</h2>${stateBadge(track.freshness || "NOT_AVAILABLE")}</div><div class="section-body"><div class="state-list">
+        ${badgeRow("Class", track.object_class)}
+        ${badgeRow("Camera", track.camera_name)}
+        ${badgeRow("Zone", track.zone_name || "NOT_SCOPED", "NOT_SCOPED")}
+        ${badgeRow("Last seen", track.last_seen_at ? formatDate(track.last_seen_at) : "NOT_AVAILABLE")}
+        ${badgeRow("First seen", track.first_seen_at ? formatDate(track.first_seen_at) : "NOT_AVAILABLE")}
+        ${badgeRow("Latest detection", last?.object_class || "NO_DETECTION_RECORDED", "NO_DETECTION_RECORDED")}
+        ${badgeRow("Latest confidence", last?.confidence ?? "NOT_RECORDED", "NOT_RECORDED")}
+        ${badgeRow("Latest observation state", last?.observation_state || "NO_DETECTION_RECORDED", "NO_DETECTION_RECORDED")}
+        ${badgeRow("Safety state", active.length ? "ACTIVE_EVENT_RECORDED" : "NO_ACTIVE_EVENT_RECORDED", "NO_ACTIVE_EVENT_RECORDED")}
+        ${badgeRow("Active event records", active.map((event) => `${event.event_type} · ${event.severity} · ${event.workflow_state}`).join("; ") || "NONE_RECORDED", "NONE_RECORDED")}
+        ${badgeRow("Linked incidents", trackIncidents.length ? trackIncidents.map((incidentId) => incidentId.slice(0, 12)).join(", ") : "NONE_RECORDED", "NONE_RECORDED")}
+        ${unsupported}
+      </div></div></article>`;
+    }).join("");
+    content.innerHTML = `<section class="section"><div class="section-head"><h2>Recently observed visual tracks</h2><span>${tracks.length} REAL DATABASE RECORDS · 30 SECOND WINDOW</span></div>${cards ? `<div class="worker-grid">${cards}</div>` : `<div class="empty-state"><div><strong>NO_LIVE_TRACK_DATA</strong>No persisted track records were observed in the last 30 seconds. This does not indicate that the area is safe.</div></div>`}</section>
+      <section class="section"><div class="section-head"><h2>Detector capability behind these tracks</h2><span>BACKEND MODEL HEALTH</span></div><div class="section-body"><div class="state-list">
+        ${badgeRow("Model", model.status || "MODEL_NOT_CONFIGURED")}
+        ${badgeRow("Weights", model.weights_loaded ? "WEIGHTS_LOADED" : "MODEL_NOT_CONFIGURED")}
+        ${badgeRow("Supported classes", (model.classes || []).join(", ") || "NOT_AVAILABLE")}
+        ${WORKER_UNSUPPORTED_DETECTORS.map(([, key]) => badgeRow(`${key} detector`, `${detectorImplementation(detectors, key)} · ${detectorState(detectors, key)}`)).join("")}
+      </div><p class="config-note">Helmet, PPE, and phone compliance are absence claims. No implemented detector in this build can establish them, so those fields are reported as UNKNOWN and never as a compliance or safety verdict.</p></div></section>`;
+    return true;
+  } catch (error) {
+    if (error.name !== "AbortError" && currentView === "workers") content.innerHTML = `<section class="section"><div class="section-head"><h2>Worker monitoring</h2><span>DATA UNAVAILABLE</span></div><div class="empty-state"><div><strong>NO_LIVE_TRACK_DATA</strong>${escapeHtml(error.message)}</div></div></section>`;
+    return false;
+  } finally {
+    if (workersRequestController === controller) workersRequestController = null;
+    workersRequestInFlight = false;
+  }
+}
+
+function startWorkersPolling(delay = 5000) {
+  if (workersPollingTimer !== null || currentView !== "workers") return;
+  workersPollingTimer = window.setTimeout(async () => {
+    workersPollingTimer = null;
+    if (currentView !== "workers") return;
+    const healthy = await renderWorkers();
+    startWorkersPolling(healthy ? 5000 : Math.min(delay * 2, 60000));
+  }, delay);
+}
+
+function stopWorkersPolling() {
+  if (workersPollingTimer !== null) window.clearTimeout(workersPollingTimer);
+  workersPollingTimer = null;
+  workersRequestController?.abort();
 }
 
 async function renderIncidents() {
@@ -569,61 +799,301 @@ async function renderIncidents() {
   content.innerHTML = `<section class="section"><div class="section-head"><h2>Persisted incidents</h2><span>BACKEND RECORDS · ${incidents.length}</span></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Title</th><th>Severity</th><th>Status</th><th>Event</th><th>Created</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No incidents recorded.</strong>Incidents are created only against persisted events.</div></div>`}</section>`;
 }
 
+const ALARM_ACKNOWLEDGE_ROLES = ["ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER", "SUPERVISOR"];
+const ALARM_ESCALATE_ROLES = ["ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER"];
+const ALARM_CLEAR_ROLES = ["ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER", "SUPERVISOR"];
+const ALARM_PHYSICAL_TEST_ROLES = ["ADMIN", "SAFETY_OFFICER"];
+const PHYSICAL_UNAVAILABLE_STATES = new Set(["PHYSICAL_ALARM_NOT_CONFIGURED", "ACTUATOR_NOT_CONNECTED"]);
+
+function alarmActionAllowed(roles) {
+  if (!currentIdentity) return true;
+  return roles.includes(currentIdentity.role?.name);
+}
+
+function physicalAlarmBanner(physical, health) {
+  const state = physical?.state || health?.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED";
+  const transports = formatTransportList(physical?.configured_transports ?? health?.physical_alarm_transports);
+  const unavailable = PHYSICAL_UNAVAILABLE_STATES.has(state);
+  const verified = physical?.hardware_verified === true;
+  return `<div class="status-banner ${unavailable ? "physical-blocked" : ""}">
+    <div><strong><span class="status-dot ${unavailable ? "dot-amber" : verified ? "dot-green" : "dot-muted"}"></span> PHYSICAL ACTUATOR · ${escapeHtml(state)}</strong>
+      <span>Configured transports: ${escapeHtml(transports)}. ${escapeHtml(physical?.reason || "No reason reported by the backend.")} No siren, relay, or industrial controller output is claimed by this page; only the backend actuator state is reported.</span></div>
+    <span class="status-pill">${stateBadge(physical?.enabled === true ? "ACTUATION_ENABLED" : "ACTUATION_DISABLED")} ${stateBadge(verified ? "HARDWARE_VERIFIED" : "HARDWARE_NOT_VERIFIED")}</span>
+  </div>`;
+}
+
+function alarmPolicyPanel(policy) {
+  return `<section class="section"><div class="section-head"><h2>Alarm policy</h2><span>GET /alarms/policy</span></div><div class="section-body"><div class="state-list">
+    ${badgeRow("Policy enabled", policy.alarm_policy_enabled ? "ALARM_POLICY_ENABLED" : "ALARM_POLICY_DISABLED")}
+    ${badgeRow("Minimum severity", policy.min_severity || "NOT_AVAILABLE")}
+    ${badgeRow("Cooldown seconds", formatCount(policy.cooldown_seconds))}
+    ${badgeRow("Max repeats per window", formatCount(policy.max_repeats_per_window))}
+    ${badgeRow("Repeat window seconds", formatCount(policy.repeat_window_seconds))}
+    ${badgeRow("Auto expire seconds", formatCount(policy.auto_expire_seconds))}
+    ${badgeRow("Audible browser alarm", policy.audible_browser_alarm ? "AUDIBLE_BROWSER_ALARM_ENABLED" : "AUDIBLE_BROWSER_ALARM_DISABLED")}
+    ${badgeRow("Total alarms", formatCount(policy.total_alarms))}
+    ${badgeRow("Active alarms", formatCount(policy.active_alarm_count))}
+    ${badgeRow("Escalated alarms", formatCount(policy.escalated_alarm_count))}
+    ${badgeRow("Acknowledged alarms", formatCount(policy.acknowledged_alarm_count))}
+    ${badgeRow("Suppressed alarms", formatCount(policy.suppressed_alarm_count))}
+    ${badgeRow("Expired alarms", formatCount(policy.expired_alarm_count))}
+    ${badgeRow("Cleared alarms", formatCount(policy.cleared_alarm_count))}
+    ${badgeRow("Last alarm", policy.last_alarm_id ? `${policy.last_alarm_id.slice(0, 10)} · ${formatDate(policy.last_alarm_raised_at)}` : "NO_ALARM_RECORDED", "NO_ALARM_RECORDED")}
+    ${badgeRow("Physical actuator", policy.physical_alarm?.state || "PHYSICAL_ALARM_NOT_CONFIGURED", "PHYSICAL_ALARM_NOT_CONFIGURED")}
+    ${badgeRow("Physical transports", formatTransportList(policy.physical_alarm?.configured_transports), "NONE_CONFIGURED")}
+  </div></div></section>`;
+}
+
+function alarmActionBar(alarm) {
+  const transitions = Array.isArray(alarm.allowed_transitions) ? alarm.allowed_transitions : [];
+  const ackAllowed = alarmActionAllowed(ALARM_ACKNOWLEDGE_ROLES) && transitions.includes("ACKNOWLEDGED");
+  const escalateAllowed = alarmActionAllowed(ALARM_ESCALATE_ROLES) && transitions.includes("ESCALATED");
+  const clearAllowed = alarmActionAllowed(ALARM_CLEAR_ROLES) && transitions.includes("CLEARED");
+  return `<div class="alarm-actions">
+    ${ackAllowed ? `<button class="inline-button" data-alarm-action="acknowledge" data-alarm-id="${escapeHtml(alarm.id)}" type="button">Acknowledge</button>` : `<span class="status-pill">${escapeHtml(alarmActionAllowed(ALARM_ACKNOWLEDGE_ROLES) ? "ACKNOWLEDGE_NOT_ALLOWED_FROM_STATE" : "ROLE_NOT_PERMITTED_TO_ACKNOWLEDGE")}</span>`}
+    ${escalateAllowed ? `<button class="inline-button" data-alarm-action="escalate" data-alarm-id="${escapeHtml(alarm.id)}" type="button">Escalate</button>` : `<span class="status-pill">${escapeHtml(alarmActionAllowed(ALARM_ESCALATE_ROLES) ? "ESCALATE_NOT_ALLOWED_FROM_STATE" : "ROLE_NOT_PERMITTED_TO_ESCALATE")}</span>`}
+    ${clearAllowed ? `<button class="inline-button" data-alarm-action="clear" data-alarm-id="${escapeHtml(alarm.id)}" type="button">Clear</button>` : `<span class="status-pill">${escapeHtml(alarmActionAllowed(ALARM_CLEAR_ROLES) ? "CLEAR_NOT_ALLOWED_FROM_STATE" : "ROLE_NOT_PERMITTED_TO_CLEAR")}</span>`}
+    <button class="inline-button" data-alarm-action="history" data-alarm-id="${escapeHtml(alarm.id)}" type="button">Transition history</button>
+  </div><div class="alarm-history" id="alarm-history-${escapeHtml(alarm.id)}" hidden></div>`;
+}
+
+function alarmCard(alarm) {
+  return `<article class="section alarm-card"><div class="section-head"><h2>ALARM ${escapeHtml(alarm.id.slice(0, 12))}</h2>${stateBadge(alarm.severity)}</div><div class="section-body"><div class="state-list">
+    ${badgeRow("State", alarm.state)}
+    ${badgeRow("Event", alarm.event_id ? alarm.event_id.slice(0, 12) : "NOT_RECORDED", "NOT_RECORDED")}
+    ${badgeRow("Detector", alarm.detector_key || "NOT_RECORDED", "NOT_RECORDED")}
+    ${badgeRow("Model", alarm.model_name ? `${alarm.model_name} ${alarm.model_version || ""}`.trim() : "MODEL_NOT_CONFIGURED", "MODEL_NOT_CONFIGURED")}
+    ${badgeRow("Confidence", alarm.confidence === null || alarm.confidence === undefined ? "NOT_RECORDED" : String(alarm.confidence), "NOT_RECORDED")}
+    ${badgeRow("Camera / zone / track", [alarm.camera_id || "NOT_RECORDED", alarm.zone_id || "NOT_SCOPED", alarm.track_id || "NOT_RECORDED"].join(" · "))}
+    ${badgeRow("Linked incident", alarm.incident_id || "NONE_RECORDED", "NONE_RECORDED")}
+    ${badgeRow("Raised at", alarm.raised_at ? formatDate(alarm.raised_at) : "NOT_AVAILABLE")}
+    ${badgeRow("Raised count", formatCount(alarm.raised_count))}
+    ${badgeRow("Suppression count", formatCount(alarm.suppression_count))}
+    ${badgeRow("Cooldown until", alarm.cooldown_until ? formatDate(alarm.cooldown_until) : "NO_COOLDOWN_RECORDED", "NO_COOLDOWN_RECORDED")}
+    ${badgeRow("Expires at", alarm.expires_at ? formatDate(alarm.expires_at) : "NO_AUTO_EXPIRY_RECORDED", "NO_AUTO_EXPIRY_RECORDED")}
+    ${badgeRow("Acknowledged", alarm.acknowledged_at ? `${formatDate(alarm.acknowledged_at)} · ${alarm.acknowledged_by_user_id || "UNATTRIBUTED"}` : "NOT_ACKNOWLEDGED", "NOT_ACKNOWLEDGED")}
+    ${badgeRow("Cleared at", alarm.cleared_at ? formatDate(alarm.cleared_at) : "NOT_CLEARED", "NOT_CLEARED")}
+    ${badgeRow("Reason", alarm.reason || "NO_REASON_RECORDED", "NO_REASON_RECORDED")}
+    ${badgeRow("Physical state", alarm.physical_state || "NOT_ATTEMPTED", "NOT_ATTEMPTED")}
+    ${badgeRow("Physical result", alarm.physical_result || "NO_PHYSICAL_RESULT_RECORDED", "NO_PHYSICAL_RESULT_RECORDED")}
+    ${badgeRow("Physical activated", alarm.physical_activated_at ? formatDate(alarm.physical_activated_at) : "NEVER_ACTIVATED", "NEVER_ACTIVATED")}
+    ${badgeRow("Physical cleared", alarm.physical_cleared_at ? formatDate(alarm.physical_cleared_at) : "NEVER_DEACTIVATED", "NEVER_DEACTIVATED")}
+  </div>${alarmActionBar(alarm)}</div></article>`;
+}
+
+function alarmHistoryRow(alarm) {
+  return `<tr>
+    <td class="mono">${escapeHtml(alarm.id.slice(0, 10))}</td>
+    <td>${escapeHtml(alarm.severity)}</td>
+    <td>${stateBadge(alarm.state)}</td>
+    <td>${escapeHtml(alarm.detector_key || "NOT_RECORDED")}</td>
+    <td>${escapeHtml(formatDate(alarm.raised_at))}</td>
+    <td>${escapeHtml(formatCount(alarm.raised_count))} / ${escapeHtml(formatCount(alarm.suppression_count))}</td>
+    <td>${alarm.cooldown_until ? escapeHtml(formatDate(alarm.cooldown_until)) : "NO_COOLDOWN_RECORDED"}</td>
+    <td>${stateBadge(alarm.physical_state, "NOT_ATTEMPTED")}</td>
+    <td>${escapeHtml(alarm.reason || "NO_REASON_RECORDED")}</td>
+    <td><button class="inline-button" data-alarm-action="history" data-alarm-id="${escapeHtml(alarm.id)}" type="button">History</button></td>
+  </tr>`;
+}
+
 async function renderAlarmCenter() {
-  const [events, health] = await Promise.all([request("/events?limit=200&offset=0"), request("/system/health")]);
-  const confirmed = events.filter((event) => ALARM_EVENT_TYPES.has(event.event_type) && event.observation_state === "CONFIRMED");
-  const rows = confirmed.map((event) => `<tr><td>${escapeHtml(event.event_type)}</td><td>${escapeHtml(event.severity)}</td><td>${escapeHtml(event.workflow_state)}</td><td>${escapeHtml(event.camera_id)}</td><td>${escapeHtml(event.track_uuid || "UNKNOWN")}</td><td>${escapeHtml(formatDate(event.started_at))}</td></tr>`).join("");
-  content.innerHTML = `<div class="status-banner"><div><strong>SOFTWARE ALARM · ${confirmed.length ? "CONFIRMED EVENTS PRESENT" : "NO CONFIRMED EVENTS"}</strong><span>Physical output: ${escapeHtml(health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED")}. Browser sound requires operator interaction and browser audio permission.</span></div><span class="status-pill">${escapeHtml(health.validation_status || "NOT_VALIDATED")}</span></div><section class="section"><div class="section-head"><h2>Confirmed alarm eligible events</h2><span>EVENT API</span></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Rule</th><th>Severity</th><th>Workflow</th><th>Camera</th><th>Track</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No confirmed alarm events.</strong>Unconfirmed observations are not shown as alarms.</div></div>`}</section>`;
+  const [board, history, policy, physical, health] = await Promise.all([
+    request("/alarms?active_only=true&limit=100"),
+    request("/alarms?limit=200&offset=0"),
+    request("/alarms/policy"),
+    request("/alarms/physical/status"),
+    request("/system/health"),
+  ]);
+  content.innerHTML = `${physicalAlarmBanner(physical, health)}
+    <div class="status-banner"><div><strong><span class="status-dot ${board.length ? "dot-red" : "dot-muted"}"></span> ALARM SUBSYSTEM · ${escapeHtml(policy.alarm_policy_enabled ? "ALARM_READY_EVENT_DRIVEN" : "ALARM_DISABLED_BY_POLICY")}</strong><span>The live board returned ${board.length} active or escalated alarm${board.length === 1 ? "" : "s"}. Alarms exist only where the backend persisted them from a confirmed event. Browser audio is an operator-controlled sound, not a physical output.</span></div><span class="status-pill">${stateBadge(health.validation_status || "NOT_VALIDATED")}</span></div>
+    <section class="section"><div class="section-head"><h2>Live board</h2><span>GET /alarms?active_only=true</span></div>${board.length ? `<div class="alarm-grid">${board.map(alarmCard).join("")}</div>` : `<div class="empty-state"><div><strong>NO_ACTIVE_ALARMS</strong>The API returned no ACTIVE or ESCALATED alarm. Nothing is synthesised to fill the board.</div></div>`}</section>
+    <div class="content-grid alarm-lower-grid">
+      <section class="section"><div class="section-head"><h2>Alarm history</h2><span>${history.length} PERSISTED ALARM RECORDS</span></div>${history.length ? `<div class="table-wrap"><table><thead><tr><th>Alarm</th><th>Severity</th><th>State</th><th>Detector</th><th>Raised</th><th>Raised / suppressed</th><th>Cooldown until</th><th>Physical</th><th>Reason</th><th>Transitions</th></tr></thead><tbody>${history.map(alarmHistoryRow).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>NO_ALARM_HISTORY</strong>No alarm has been persisted by the alarm engine.</div></div>`}</section>
+      <div class="alarm-side-stack">
+        ${alarmPolicyPanel(policy)}
+        <section class="section"><div class="section-head"><h2>Physical alarm test</h2><span>REAL ACTUATION ATTEMPT</span></div><div class="section-body">
+          <p class="config-note">This is not a simulation. With no transport configured the API answers PHYSICAL_ALARM_NOT_CONFIGURED; with a transport but no hardware it answers ACTUATOR_NOT_CONNECTED.</p>
+          <div class="alarm-actions">${alarmActionAllowed(ALARM_PHYSICAL_TEST_ROLES) ? `<button class="inline-button" data-alarm-action="physical-test" type="button">Attempt physical alarm test</button>` : `<span class="status-pill">ROLE_NOT_PERMITTED_PHYSICAL_TEST</span>`}</div>
+          <p id="physical-test-result" class="test-result" role="status">No physical test has been attempted from this page.</p>
+        </div></section>
+      </div>
+    </div>
+    <div class="alarm-history-host" id="alarm-history-host"></div>`;
+  content.querySelectorAll("[data-alarm-action]").forEach((button) => button.addEventListener("click", () => handleAlarmAction(button.dataset.alarmAction, button.dataset.alarmId)));
+}
+
+async function handleAlarmAction(action, alarmId) {
+  if (action === "physical-test") {
+    try {
+      const result = await request("/alarms/physical/test", { method: "POST" });
+      const output = document.querySelector("#physical-test-result");
+      if (output) output.textContent = `PHYSICAL TEST RESULT · state ${result.state} · transport ${result.transport} · reason ${result.reason || "NO_REASON_REPORTED"} · hardware_verified ${result.hardware_verified ? "TRUE" : "FALSE"}`;
+    } catch (error) { showMessage(error.message); }
+    return;
+  }
+  if (action === "history") {
+    await showAlarmTransitionHistory(alarmId);
+    return;
+  }
+  try {
+    if (action === "acknowledge") {
+      await request(`/alarms/${encodeURIComponent(alarmId)}/acknowledge`, { method: "POST", body: JSON.stringify({ notes: "Acknowledged from the alarm centre" }) });
+      showMessage(`Alarm ${alarmId.slice(0, 10)} acknowledged.`);
+    } else if (action === "escalate") {
+      const reason = window.prompt("Escalation reason (stored on the alarm):");
+      if (!reason || !reason.trim()) return;
+      await request(`/alarms/${encodeURIComponent(alarmId)}/escalate?reason=${encodeURIComponent(reason.trim())}`, { method: "POST" });
+      showMessage(`Alarm ${alarmId.slice(0, 10)} escalated.`);
+    } else if (action === "clear") {
+      const reason = window.prompt("Clear reason (stored on the alarm):");
+      if (!reason || !reason.trim()) return;
+      await request(`/alarms/${encodeURIComponent(alarmId)}/clear`, { method: "POST", body: JSON.stringify({ reason: reason.trim(), deactivate_physical: true }) });
+      showMessage(`Alarm ${alarmId.slice(0, 10)} cleared.`);
+    }
+    await refreshAlarmState();
+    if (currentView === "alarm") await renderAlarmCenter();
+  } catch (error) {
+    showMessage(error.message);
+  }
+}
+
+async function showAlarmTransitionHistory(alarmId) {
+  let target = document.querySelector(`#alarm-history-${CSS.escape(alarmId)}`);
+  if (!target) {
+    target = document.createElement("div");
+    target.className = "detail-panel alarm-history";
+    target.id = `alarm-history-${alarmId}`;
+    document.querySelector("#alarm-history-host")?.append(target);
+  }
+  if (!target.isConnected) return;
+  if (!target.hidden && target.dataset.loaded === "true") { target.hidden = true; return; }
+  target.hidden = false;
+  target.innerHTML = `<div class="empty-state"><div><strong>LOADING_TRANSITION_HISTORY</strong>Reading the audited alarm history.</div></div>`;
+  try {
+    const rows = await request(`/alarms/${encodeURIComponent(alarmId)}/history`);
+    target.innerHTML = rows.length
+      ? `<div class="table-wrap"><table><thead><tr><th>From</th><th>To</th><th>Reason</th><th>Actor</th><th>Time</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${stateBadge(row.previous_state || "INITIAL_STATE")}</td><td>${stateBadge(row.new_state)}</td><td>${escapeHtml(row.reason || "NO_REASON_RECORDED")}</td><td>${escapeHtml(row.user_id || "UNATTRIBUTED")}</td><td>${escapeHtml(formatDate(row.transitioned_at))}</td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty-state"><div><strong>NO_TRANSITIONS_RECORDED</strong>The backend returned no audited state transitions for this alarm.</div></div>`;
+    target.dataset.loaded = "true";
+  } catch (error) {
+    target.innerHTML = `<div class="empty-state"><div><strong>NOT_AVAILABLE</strong>${escapeHtml(error.message)}</div></div>`;
+  }
+}
+
+function detectorCapabilityRow(detector) {
+  const configuration = detector.configuration || {};
+  const health = detector.health || {};
+  return `<tr>
+    <td><strong>${escapeHtml(detector.detector_key)}</strong></td>
+    <td>${stateBadge(detector.implementation_state)}</td>
+    <td>${stateBadge(detector.availability_state)}</td>
+    <td>${detector.operational ? stateBadge("OPERATIONAL") : stateBadge("NOT_OPERATIONAL")}</td>
+    <td>${detector.enabled ? stateBadge("ENABLED") : stateBadge("DISABLED")}</td>
+    <td>${detector.configured ? stateBadge("CONFIGURED") : stateBadge("NOT_CONFIGURED")}</td>
+    <td>${stateBadge(detector.detection_capability || "NONE", "NONE")}</td>
+    <td>${stateBadge(detector.validation_state || "NOT_CONFIGURED", "NOT_CONFIGURED")}</td>
+    <td>${stateBadge(health.model_status || "MODEL_NOT_CONFIGURED", "MODEL_NOT_CONFIGURED")}</td>
+    <td>${escapeHtml(configuration.threshold_source || "NOT_CONFIGURED")}</td>
+    <td>${escapeHtml(configuration.scope_camera_id || configuration.scope_zone_id || "SITE")}</td>
+    <td>${escapeHtml(detector.reason || "NO_REASON_REPORTED")}</td>
+  </tr>`;
 }
 
 async function renderRules() {
-  const [ppe, detectors, rules, thresholds, escalation, policies, capability] = await Promise.all([
+  const [ppe, detectorConfigs, rules, thresholds, escalation, policies, capability, detectorHealth] = await Promise.all([
     request("/configuration/ppe-rules"), request("/configuration/detector-configs"), request("/configuration/safety-rules"),
-    request("/configuration/operating-thresholds"), request("/configuration/escalation-policies"), request("/configuration/notification-policies"), request("/system/ai-health"),
+    request("/configuration/operating-thresholds"), request("/configuration/escalation-policies"), request("/configuration/notification-policies"),
+    request("/system/ai-health"), request("/system/detectors"),
   ]);
   const model = capability.model || {};
-  const rows = [...ppe.map((x) => ({ type: `PPE · ${x.ppe_type}`, enabled: x.is_mandatory ? "MANDATORY" : "CONFIGURED", scope: x.zone_id, capability: model.weights_loaded ? "MODEL AVAILABLE · RULE NOT VALIDATED" : "MODEL_NOT_CONFIGURED" })), ...detectors.map((x) => ({ type: x.detector_key, enabled: x.is_enabled ? "ENABLED" : "DISABLED", scope: x.camera_id || x.zone_id || "GLOBAL", capability: model.weights_loaded ? x.validation_status : "MODEL_NOT_CONFIGURED" })), ...rules.map((x) => ({ type: `${x.code} · ${x.name}`, enabled: x.is_active ? "ENABLED" : "DISABLED", scope: x.zone_id || "GLOBAL", capability: x.validation_status }))];
-  const body = rows.map((x) => `<tr><td>${escapeHtml(x.type)}</td><td>${escapeHtml(x.enabled)}</td><td>${escapeHtml(x.scope)}</td><td>${escapeHtml(x.capability)}</td></tr>`).join("");
-  content.innerHTML = `<section class="section"><div class="section-head"><h2>Configured rules</h2><span>NO MODEL OUTPUT IS IMPLIED</span></div>${body ? `<div class="table-wrap"><table><thead><tr><th>Rule</th><th>Configuration</th><th>Scope</th><th>Capability / validation</th></tr></thead><tbody>${body}</tbody></table></div>` : `<div class="empty-state"><div><strong>No rules configured.</strong>Rules appear when returned by configuration APIs.</div></div>`}</section><div class="metrics-grid">${metric("Operating thresholds", thresholds.length)}${metric("Escalation policies", escalation.length)}${metric("Notification policies", policies.length)}${metric("Phone detection", "NOT_CONFIGURED", "No supported result available")}</div>`;
+  const detectors = detectorHealth.detectors || [];
+  const detectorsByKey = detectorMap(detectorHealth);
+  const rows = [...ppe.map((x) => ({ type: `PPE · ${x.ppe_type}`, enabled: x.is_mandatory ? "MANDATORY" : "CONFIGURED", scope: x.zone_id, capability: model.weights_loaded ? "MODEL AVAILABLE · RULE NOT VALIDATED" : "MODEL_NOT_CONFIGURED" })), ...detectorConfigs.map((x) => ({ type: x.detector_key, enabled: x.is_enabled ? "ENABLED" : "DISABLED", scope: x.camera_id || x.zone_id || "GLOBAL", capability: model.weights_loaded ? x.validation_status : "MODEL_NOT_CONFIGURED" })), ...rules.map((x) => ({ type: `${x.code} · ${x.name}`, enabled: x.is_active ? "ENABLED" : "DISABLED", scope: x.zone_id || "GLOBAL", capability: x.validation_status }))];
+  const body = rows.map((x) => `<tr><td>${escapeHtml(x.type)}</td><td>${stateBadge(x.enabled)}</td><td>${escapeHtml(x.scope || "NOT_SCOPED")}</td><td>${stateBadge(x.capability || "NOT_CONFIGURED", "NOT_CONFIGURED")}</td></tr>`).join("");
+  const detectorBody = detectors.map(detectorCapabilityRow).join("");
+  content.innerHTML = `<section class="section"><div class="section-head"><h2>Detector capability and configuration</h2><span>GET /system/detectors · NO MODEL OUTPUT IS IMPLIED</span></div>${detectorBody ? `<div class="table-wrap"><table><thead><tr><th>Detector</th><th>Implementation</th><th>Availability</th><th>Operational</th><th>Enabled</th><th>Configured</th><th>Detection capability</th><th>Validation</th><th>Model health</th><th>Threshold source</th><th>Scope</th><th>Reason</th></tr></thead><tbody>${detectorBody}</tbody></table></div>` : `<div class="empty-state"><div><strong>NO_DETECTOR_STATE</strong>The detector capability endpoint returned no rows.</div></div>`}<div class="section-body"><div class="state-list">
+    ${badgeRow("Model status", detectorHealth.model_status || "MODEL_NOT_CONFIGURED")}
+    ${badgeRow("Model classes available", formatCount(detectorHealth.model_classes_available))}
+    ${badgeRow("Operational detectors", formatCount(detectorHealth.operational_detector_count))}
+    ${badgeRow("IGL validation", detectorHealth.igl_validation_status || "NOT_VALIDATED")}
+    ${badgeRow("Helmet detector", `${detectorImplementation(detectorsByKey, "HELMET")} · ${detectorState(detectorsByKey, "HELMET")}`)}
+    ${badgeRow("PPE detector", `${detectorImplementation(detectorsByKey, "PPE")} · ${detectorState(detectorsByKey, "PPE")}`)}
+    ${badgeRow("Safety vest detector", `${detectorImplementation(detectorsByKey, "SAFETY_VEST")} · ${detectorState(detectorsByKey, "SAFETY_VEST")}`)}
+    ${badgeRow("Proximity detector", `${detectorImplementation(detectorsByKey, "PROXIMITY")} · ${detectorState(detectorsByKey, "PROXIMITY")}`)}
+    ${badgeRow("Fall detector", `${detectorImplementation(detectorsByKey, "FALL")} · ${detectorState(detectorsByKey, "FALL")}`)}
+    ${badgeRow("Leakage detector", `${detectorImplementation(detectorsByKey, "LEAKAGE")} · ${detectorState(detectorsByKey, "LEAKAGE")}`)}
+    ${badgeRow("Unsafe behaviour detector", `${detectorImplementation(detectorsByKey, "UNSAFE_BEHAVIOR")} · ${detectorState(detectorsByKey, "UNSAFE_BEHAVIOR")}`)}
+    ${badgeRow("Person detector", `${detectorImplementation(detectorsByKey, "PERSON")} · ${detectorState(detectorsByKey, "PERSON")}`)}
+    ${badgeRow("Phone detector", `${detectorImplementation(detectorsByKey, "PHONE")} · ${detectorState(detectorsByKey, "PHONE")}`)}
+  </div><p class="config-note">Implementation state and availability state are reported separately: NOT_IMPLEMENTED means this build cannot evaluate the detector at all, while MODEL_NOT_CONFIGURED means the code exists but no model is loaded. Neither state is ever presented as a passing compliance check.</p></div></section>
+    <section class="section"><div class="section-head"><h2>Configured rules</h2><span>OPERATOR-SUPPLIED CONFIGURATION ONLY</span></div>${body ? `<div class="table-wrap"><table><thead><tr><th>Rule</th><th>Configuration</th><th>Scope</th><th>Capability / validation</th></tr></thead><tbody>${body}</tbody></table></div>` : `<div class="empty-state"><div><strong>No rules configured.</strong>Rules appear when returned by configuration APIs.</div></div>`}</section>
+    <div class="metrics-grid">
+      ${metric("Operating thresholds", formatCount(thresholds.length))}
+      ${metric("Escalation policies", formatCount(escalation.length))}
+      ${metric("Notification policies", formatCount(policies.length))}
+      ${metricBadge("Phone detection", detectorImplementation(detectorsByKey, "PHONE"), detectorState(detectorsByKey, "PHONE"), "Backend detector state")}
+    </div>`;
+}
+
+function deliveryStatusOf(record) {
+  return record?.delivery_status || record?.last_delivery_status || record?.status || "DELIVERY_STATUS_NOT_REPORTED";
+}
+
+function deliveryTestSummary(label, result) {
+  const parts = [`${label} · delivery_status ${deliveryStatusOf(result)}`, `provider ${result?.provider || "NOT_REPORTED"}`];
+  if (result?.message_id) parts.push(`message_id ${result.message_id}`);
+  if (result?.error) parts.push(`error ${result.error}`);
+  return parts.join(" · ");
 }
 
 async function renderNotifications() {
   const [items, channels] = await Promise.all([request("/notifications?limit=200&offset=0"), request("/notifications/channels/status")]);
-  const rows = items.map((x) => `<tr><td class="mono">${escapeHtml((x.event_id || x.id).slice(0, 12))}</td><td>${escapeHtml(x.channel)}</td><td>${escapeHtml(maskedRecipient(x.recipient || x.recipient_role))}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.retry_count)} / ${escapeHtml(x.max_attempts)}</td><td>${escapeHtml(formatDate(x.last_attempt_at || x.created_at))}</td><td>${escapeHtml(x.error_message || x.provider || "—")}</td></tr>`).join("");
+  const rows = items.map((x) => `<tr><td class="mono">${escapeHtml((x.event_id || x.id).slice(0, 12))}</td><td>${escapeHtml(x.channel)}</td><td>${escapeHtml(maskedRecipient(x.recipient || x.recipient_role))}</td><td>${stateBadge(x.status)}</td><td>${stateBadge(deliveryStatusOf(x))}</td><td>${escapeHtml(x.retry_count)} / ${escapeHtml(x.max_attempts)}</td><td>${escapeHtml(formatDate(x.last_attempt_at || x.created_at))}</td><td>${escapeHtml(x.error_message || x.provider || "NOT_REPORTED")}</td></tr>`).join("");
+  const channelRows = channels.map((channel) => `<tr><td>${escapeHtml(channel.channel)}</td><td>${stateBadge(channel.configuration_state)}</td><td>${stateBadge(channel.delivery_status || channel.last_delivery_status, "DELIVERY_STATUS_NOT_REPORTED")}</td><td>${escapeHtml(formatCount(channel.queued))}</td><td>${escapeHtml(formatCount(channel.sent))}</td><td>${escapeHtml(formatCount(channel.failed))}</td><td>${escapeHtml(formatCount(channel.not_configured))}</td><td>${escapeHtml(formatCount(channel.retrying))}</td></tr>`).join("");
   const canTest = ["ADMIN", "SAFETY_OFFICER"].includes(currentIdentity?.role?.name);
-  content.innerHTML = `<section class="section"><div class="section-head"><h2>Provider configuration</h2><span>SECRETS REMAIN ON BACKEND</span></div><div class="section-body">${stateRows(channels.map((x) => [x.channel, `${x.configuration_state} · queued ${x.queued} · sent ${x.sent} · failed ${x.failed}`]))}<p class="config-note">SMTP and WhatsApp Cloud API credentials are read from backend environment configuration. This page never accepts or stores provider secrets.</p></div></section>${canTest ? `<section class="section"><div class="section-head"><h2>Send an explicit provider test</h2><span>REAL DELIVERY ATTEMPT WHEN SUBMITTED</span></div><div class="section-body"><form id="delivery-test-form" class="delivery-test-form"><label>Channel<select name="channel"><option value="email">Email</option><option value="whatsapp">WhatsApp</option></select></label><label>Recipient<input name="recipient" required maxlength="255" autocomplete="off"></label><button class="inline-button" type="submit">Send test</button></form><p id="delivery-test-result" role="status"></p></div></section>` : ""}<section class="section"><div class="section-head"><h2>Delivery records</h2><span>PROVIDER ACCEPTANCE DOES NOT CONFIRM HUMAN RECEIPT</span></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Event</th><th>Channel</th><th>Recipient</th><th>State</th><th>Retries</th><th>Last attempt</th><th>Provider / error</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No delivery records.</strong>No notification rows were returned.</div></div>`}</section>`;
-  document.querySelector("#delivery-test-form")?.addEventListener("submit", async (event) => {
-    event.preventDefault(); const form = new FormData(event.currentTarget); const output = document.querySelector("#delivery-test-result");
-    output.textContent = "Sending request to backend…";
-    try { const channel = form.get("channel"); const result = await request(`/notifications/test/${channel}`, { method: "POST", body: JSON.stringify({ recipient: form.get("recipient") }) }); output.textContent = `${result.status} · ${result.provider}${result.message_id ? ` · ${result.message_id}` : ""}${result.error ? ` · ${result.error}` : ""}`; }
-    catch (error) { output.textContent = error.message; }
-  });
+  content.innerHTML = `<section class="section"><div class="section-head"><h2>Provider configuration and delivery state</h2><span>SECRETS REMAIN ON BACKEND</span></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>Configuration state</th><th>Delivery status</th><th>Queued</th><th>Sent</th><th>Failed</th><th>Not configured</th><th>Retrying</th></tr></thead><tbody>${channelRows}</tbody></table></div>` : `<div class="empty-state"><div><strong>NO_CHANNEL_STATUS</strong>The channel status endpoint returned no rows.</div></div>`}<div class="section-body"><p class="config-note">A queued or sent notification is a backend record. Configuration state never implies that a message was delivered, and a provider acceptance is not proof that a person read it.</p></div></section>
+    ${canTest ? `<section class="section"><div class="section-head"><h2>Explicit provider test</h2><span>REAL DELIVERY ATTEMPT WHEN SUBMITTED</span></div><div class="section-body"><div class="notification-test-grid">
+      <form id="email-test-form"><label>Test email recipient<input name="recipient" type="email" required autocomplete="email"></label><button class="inline-button" type="submit">TEST EMAIL</button></form>
+      <form id="whatsapp-test-form"><label>WhatsApp recipient in E.164 format<input name="recipient" type="tel" required placeholder="+15551234567" autocomplete="tel"></label><button class="inline-button" type="submit">TEST WHATSAPP</button></form>
+    </div><p id="email-test-result" class="test-result" role="status">No email test has been sent from this page.</p><p id="whatsapp-test-result" class="test-result" role="status">No WhatsApp test has been sent from this page.</p></div></section>` : `<section class="section"><div class="section-head"><h2>Explicit provider test</h2><span>ROLE REQUIRED</span></div><div class="section-body"><p class="config-note">Sending a provider test requires the ADMIN or SAFETY_OFFICER role. No test is attempted for this account.</p></div></section>`}
+    <section class="section"><div class="section-head"><h2>Delivery records</h2><span>PROVIDER ACCEPTANCE DOES NOT CONFIRM HUMAN RECEIPT</span></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Event</th><th>Channel</th><th>Recipient</th><th>State</th><th>Delivery status</th><th>Retries</th><th>Last attempt</th><th>Provider / error</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No delivery records.</strong>No notification rows were returned.</div></div>`}</section>`;
+  content.querySelectorAll("#email-test-form, #whatsapp-test-form").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const recipient = new FormData(form).get("recipient");
+    const channel = form.id === "email-test-form" ? "email" : "whatsapp";
+    const output = document.querySelector(`#${channel}-test-result`);
+    if (output) output.textContent = `REQUEST_SENT_TO_BACKEND · ${channel.toUpperCase()}`;
+    try {
+      const result = await request(`/notifications/test/${channel}`, { method: "POST", body: JSON.stringify({ recipient }) });
+      if (output) output.textContent = deliveryTestSummary(`${channel.toUpperCase()} TEST RESULT`, result);
+    } catch (error) {
+      if (output) output.textContent = `${channel.toUpperCase()} TEST FAILED · ${error.message}`;
+    }
+  }));
 }
 
-function renderAlarmState(events, error = null) {
+function renderAlarmRegion(alarms, error = null) {
   const region = document.querySelector("#alarm-region");
   if (!region) return;
   if (error) {
     region.innerHTML = `<div class="alarm-banner alarm-unavailable"><div><span class="alarm-label">ALARM STATE</span><strong>UNAVAILABLE</strong></div><span>${escapeHtml(error)}</span></div>`;
+    stopAlarmSound();
     return;
   }
-  activeAlarmEvents = events.filter((event) => (
-    ALARM_EVENT_TYPES.has(event.event_type)
-    && event.observation_state === "CONFIRMED"
-    && ["NEW", "UNACKNOWLEDGED"].includes(event.workflow_state)
-  ));
-  if (!activeAlarmEvents.length) {
-    region.innerHTML = `<div class="alarm-banner alarm-clear"><div class="alarm-copy"><span class="alarm-label">ALARM STATE</span><strong>NO ACTIVE CONFIRMED SAFETY EVENTS</strong><span>Camera health and unconfirmed observations are not safety alarms.</span></div><button class="alarm-sound-button" id="alarm-sound-toggle" type="button" aria-pressed="${alarmSoundEnabled}">${alarmSoundEnabled ? "Disable browser sound" : "Enable browser sound"}</button></div>`;
+  activeAlarmsState = Array.isArray(alarms) ? alarms : [];
+  const soundToggle = `<button class="alarm-sound-button" id="alarm-sound-toggle" type="button" aria-pressed="${alarmSoundEnabled}">${alarmSoundEnabled ? "Mute browser alarm" : "Enable browser alarm"}</button>`;
+  if (!activeAlarmsState.length) {
+    region.innerHTML = `<div class="alarm-banner alarm-clear"><div class="alarm-copy"><span class="alarm-label">ALARM STATE</span><strong>NO ACTIVE PERSISTED ALARMS</strong><span>The alarm API returned no ACTIVE or ESCALATED alarm. Camera health records and unconfirmed observations are not safety alarms.</span></div>${soundToggle}</div>`;
     region.querySelector("#alarm-sound-toggle").addEventListener("click", toggleAlarmSound);
     synchronizeAlarmSound();
     return;
   }
-
+  const canAcknowledge = userCan("events:acknowledge") && alarmActionAllowed(ALARM_ACKNOWLEDGE_ROLES);
   region.innerHTML = `<div class="alarm-banner alarm-active" role="alert">
-    <div class="alarm-summary"><span class="alarm-label">ACTIVE SAFETY ALARM</span><strong>${activeAlarmEvents.length} CONFIRMED EVENT${activeAlarmEvents.length === 1 ? "" : "S"} AWAITING ACKNOWLEDGEMENT</strong></div>
-    <div class="alarm-event-list">${activeAlarmEvents.map((event) => `<div class="alarm-event-row"><span><strong>${escapeHtml(event.event_type)}</strong><span>${escapeHtml(event.severity)} · ${escapeHtml(formatDate(event.started_at))}</span></span>${userCan("events:acknowledge") ? `<button class="alarm-ack-button" data-alarm-ack="${escapeHtml(event.id)}" type="button">Acknowledge</button>` : `<span class="status-pill">ACKNOWLEDGEMENT PERMISSION REQUIRED</span>`}</div>`).join("")}</div>
-    <p class="browser-camera-note">Browser audio only · no physical relay or siren is configured.</p>
-    <button class="alarm-sound-button" id="alarm-sound-toggle" type="button" aria-pressed="${alarmSoundEnabled}">${alarmSoundEnabled ? "Disable browser sound" : "Enable browser sound"}</button>
+    <div class="alarm-summary"><span class="alarm-label">ACTIVE SAFETY ALARM</span><strong>${activeAlarmsState.length} PERSISTED ALARM${activeAlarmsState.length === 1 ? "" : "S"} ON THE LIVE BOARD</strong></div>
+    <div class="alarm-event-list">${activeAlarmsState.map((alarm) => `<div class="alarm-event-row"><span><strong>${escapeHtml(alarm.severity)} · ${escapeHtml(alarm.state)}</strong><span>${escapeHtml(alarm.id.slice(0, 10))} · raised ${escapeHtml(formatDate(alarm.raised_at))} · physical ${escapeHtml(alarm.physical_state || "NOT_ATTEMPTED")}</span></span>${canAcknowledge ? `<button class="alarm-ack-button" data-alarm-ack="${escapeHtml(alarm.id)}" type="button">Acknowledge</button>` : `<span class="status-pill">ACKNOWLEDGEMENT PERMISSION REQUIRED</span>`}</div>`).join("")}</div>
+    <p class="browser-camera-note">Browser audio only. No siren, relay, or GPIO output is claimed here; the physical actuator state is reported separately by the backend.</p>
+    ${soundToggle}
   </div>`;
   region.querySelectorAll("[data-alarm-ack]").forEach((button) => {
     button.addEventListener("click", () => acknowledgeAlarm(button.dataset.alarmAck));
@@ -636,12 +1106,12 @@ async function refreshAlarmState() {
   if (alarmRequestInFlight) return;
   alarmRequestInFlight = true;
   try {
-    const events = await request("/events?limit=500&offset=0");
-    renderAlarmState(events);
+    const alarms = await request("/alarms?active_only=true&limit=100");
+    renderAlarmRegion(alarms);
   } catch (error) {
-    activeAlarmEvents = [];
+    activeAlarmsState = [];
     stopAlarmSound();
-    renderAlarmState([], error.message);
+    renderAlarmRegion([], error.message);
   } finally {
     alarmRequestInFlight = false;
   }
@@ -653,16 +1123,17 @@ function startAlarmPolling() {
   alarmPollingTimer = window.setInterval(refreshAlarmState, 5000);
 }
 
-async function acknowledgeAlarm(eventId) {
-  const button = document.querySelector(`[data-alarm-ack="${CSS.escape(eventId)}"]`);
+async function acknowledgeAlarm(alarmId) {
+  const button = document.querySelector(`[data-alarm-ack="${CSS.escape(alarmId)}"]`);
   if (button) button.disabled = true;
   try {
-    await request(`/events/${encodeURIComponent(eventId)}/acknowledgements`, {
+    await request(`/alarms/${encodeURIComponent(alarmId)}/acknowledge`, {
       method: "POST",
       body: JSON.stringify({ notes: "Acknowledged from the local dashboard alarm" }),
     });
-    showMessage("Acknowledgement recorded. This anonymous deployment cannot attribute the action to a named operator.");
+    showMessage(`Alarm ${alarmId.slice(0, 10)} acknowledged.`);
     await refreshAlarmState();
+    if (currentView === "alarm") await renderAlarmCenter();
   } catch (error) {
     showMessage(error.message);
     if (button) button.disabled = false;
@@ -673,7 +1144,7 @@ async function toggleAlarmSound() {
   if (alarmSoundEnabled) {
     alarmSoundEnabled = false;
     stopAlarmSound();
-    renderAlarmState(activeAlarmEvents);
+    renderAlarmRegion(activeAlarmsState);
     return;
   }
   const AudioContextType = window.AudioContext || window.webkitAudioContext;
@@ -685,7 +1156,7 @@ async function toggleAlarmSound() {
     alarmAudioContext ||= new AudioContextType();
     await alarmAudioContext.resume();
     alarmSoundEnabled = true;
-    renderAlarmState(activeAlarmEvents);
+    renderAlarmRegion(activeAlarmsState);
     synchronizeAlarmSound();
   } catch {
     showMessage("Browser audio could not be enabled; visible alarm state remains active.");
@@ -693,7 +1164,7 @@ async function toggleAlarmSound() {
 }
 
 function synchronizeAlarmSound() {
-  if (!alarmSoundEnabled || !activeAlarmEvents.length) {
+  if (!alarmSoundEnabled || !activeAlarmsState.length) {
     stopAlarmSound();
     return;
   }
@@ -818,7 +1289,7 @@ async function renderConfiguration() {
         <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Channel<select name="channel"><option>DASHBOARD</option><option>EMAIL</option><option>WHATSAPP</option><option>WEBHOOK</option><option>SMS</option><option>TEAMS</option><option>BUZZER</option></select></label><label>Recipient role<select name="recipient_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option><option>SUPERVISOR</option><option>VIEWER</option></select></label><label>Deduplication window seconds<input name="dedup_window_seconds" type="number" min="0" max="86400" value="300" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><label class="checkbox-label"><input name="is_enabled" type="checkbox" checked> Enable policy</label><button class="inline-button" type="submit">Save notification policy</button>
       </div></form>
     </div></details>
-    <section class="section notification-transport"><div class="section-head"><h2>Delivery transports</h2><span>TEST SENDS CONTACT REAL RECIPIENTS</span></div><div class="section-body">${stateRows(notificationChannels.filter((item) => ["EMAIL", "WHATSAPP"].includes(item.channel)).map((item) => [item.channel, `${item.configuration_state} · QUEUED ${item.queued} · SENT ${item.sent} · FAILED ${item.failed}`]))}<p class="config-note">Configure transport credentials in the backend environment, restart the API, then send only to an operator-approved recipient. A provider acceptance is not proof that a person read the message.</p><div class="notification-test-grid"><form id="email-test-form"><label>Test email recipient<input name="recipient" type="email" required autocomplete="email"></label><button class="inline-button" type="submit">Send test email</button></form><form id="whatsapp-test-form"><label>WhatsApp recipient in E.164 format<input name="recipient" type="tel" required placeholder="+15551234567" autocomplete="tel"></label><button class="inline-button" type="submit">Send test WhatsApp</button></form></div></div></section>
+    <section class="section notification-transport"><div class="section-head"><h2>Delivery transports</h2><span>TEST SENDS CONTACT REAL RECIPIENTS</span></div><div class="section-body">${stateRows(notificationChannels.filter((item) => ["EMAIL", "WHATSAPP"].includes(item.channel)).map((item) => [item.channel, `${item.configuration_state}${item.delivery_status || item.last_delivery_status ? ` · ${deliveryStatusOf(item)}` : ""} · QUEUED ${formatCount(item.queued)} · SENT ${formatCount(item.sent)} · FAILED ${formatCount(item.failed)}`]))}<p class="config-note">Configure transport credentials in the backend environment, restart the API, then send only to an operator-approved recipient. A provider acceptance is not proof that a person read the message.</p><div class="notification-test-grid"><form id="email-test-form"><label>Test email recipient<input name="recipient" type="email" required autocomplete="email"></label><button class="inline-button" type="submit">TEST EMAIL</button></form><form id="whatsapp-test-form"><label>WhatsApp recipient in E.164 format<input name="recipient" type="tel" required placeholder="+15551234567" autocomplete="tel"></label><button class="inline-button" type="submit">TEST WHATSAPP</button></form></div><p id="config-test-result" class="test-result" role="status">No provider test has been sent from this page.</p></div></section>
     <div class="content-grid configuration-records">
       ${currentState("Plants", plants, (items) => `<table><thead><tr><th>Name</th><th>Code</th><th>Location</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.location || "NOT_AVAILABLE")}</td></tr>`).join("")}</tbody></table>`)}
       ${currentState("Zones", zones, (items) => `<table><thead><tr><th>Name</th><th>Type</th><th>Geometry</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.zone_type)}</td><td>${item.geometry_json ? "CONFIGURED" : "NOT_CONFIGURED"}</td></tr>`).join("")}</tbody></table>`)}
@@ -867,10 +1338,14 @@ async function renderConfiguration() {
     event.preventDefault();
     const recipient = new FormData(form).get("recipient");
     const channel = form.id === "email-test-form" ? "email" : "whatsapp";
+    const output = document.querySelector("#config-test-result");
+    if (output) output.textContent = `REQUEST_SENT_TO_BACKEND · ${channel.toUpperCase()}`;
     try {
       const result = await request(`/notifications/test/${channel}`, { method: "POST", body: JSON.stringify({ recipient }) });
-      showMessage(`${result.status}: ${result.error || `accepted by ${result.provider}`}`);
-    } catch (error) { showMessage(error.message); }
+      if (output) output.textContent = deliveryTestSummary(`${channel.toUpperCase()} TEST RESULT`, result);
+    } catch (error) {
+      if (output) output.textContent = `${channel.toUpperCase()} TEST FAILED · ${error.message}`;
+    }
   }));
 }
 
@@ -978,17 +1453,58 @@ function stopBrowserCamera() {
 async function renderSystem() {
   const health = await request("/system/health");
   const model = health.model || {};
-  content.innerHTML = `<div class="status-banner"><div><strong>${escapeHtml(health.overall_status)}</strong><span>Derived from available subsystem checks. This does not imply real-input validation.</span></div><span class="status-pill">${escapeHtml(health.validation_status)}</span></div>
-    <div class="content-grid"><section class="section"><div class="section-head"><h2>Subsystem status</h2></div><div class="section-body">${stateRows([
-      ["Application process", health.application], ["Database", health.database], ["Migrations", health.migrations],
-      ["Cameras", health.camera_state], ["Camera monitor", health.camera_health_worker],
-      ["Inference pipeline", health.inference_pipeline], ["Model", health.model_state], ["Evidence", health.evidence_subsystem],
-      ["Notifications", health.notification_subsystem], ["Frontend connectivity", health.frontend_connectivity],
-      ["Measured performance", health.measured_performance], ["Physical alarm output", "PHYSICAL_ALARM_NOT_CONFIGURED"], ["IGL validated", health.igl_validated],
-    ])}</div></section><section class="section"><div class="section-head"><h2>Model configuration</h2></div><div class="section-body">${stateRows([
-      ["Name", model.model_name], ["Version", model.model_version], ["Classes", model.classes?.length ?? "NOT_AVAILABLE"],
-      ["Confidence threshold", model.confidence_threshold], ["Inference count", model.inference_count], ["Average latency", model.average_inference_latency_ms ?? "NOT_MEASURED"],
-    ])}</div></section></div>`;
+  content.innerHTML = `<div class="status-banner"><div><strong><span class="status-dot ${health.overall_status === "OPERATIONAL" ? "dot-green" : "dot-amber"}"></span> ${escapeHtml(health.overall_status || "NOT_AVAILABLE")}</strong><span>Derived from available subsystem checks. This does not imply real-input validation.</span></div><span class="status-pill">${stateBadge(health.validation_status || "NOT_VALIDATED")}</span></div>
+    <div class="metrics-grid">
+      ${metricBadge("Process uptime", formatUptime(health), health.uptime_state || "UPTIME_UNAVAILABLE", health.uptime_seconds === null || health.uptime_seconds === undefined ? "No uptime measurement is available" : `Measured ${formatCount(health.uptime_seconds)} seconds`)}
+      ${metricBadge("Disk state", health.disk_state || "DISK_UNAVAILABLE", health.disk_state || "DISK_UNAVAILABLE", health.disk_free_percent === null || health.disk_free_percent === undefined ? "Free space is not measured" : `${health.disk_free_percent}% free on ${health.disk_path || "NOT_REPORTED"}`)}
+      ${metricBadge("Camera FPS", formatFps(health.camera_fps), health.measured_performance || "NOT_MEASURED", "Measured from observed frames only", "NOT_MEASURED")}
+      ${metricBadge("Inference FPS", formatFps(health.inference_fps), health.measured_performance || "NOT_MEASURED", "Measured from completed inferences only", "NOT_MEASURED")}
+      ${metricBadge("Email transport", health.email_transport || "EMAIL_NOT_CONFIGURED", health.email_transport || "EMAIL_NOT_CONFIGURED", "Configuration state only", "EMAIL_NOT_CONFIGURED")}
+      ${metricBadge("WhatsApp transport", health.whatsapp_transport || "WHATSAPP_NOT_CONFIGURED", health.whatsapp_transport || "WHATSAPP_NOT_CONFIGURED", "Configuration state only", "WHATSAPP_NOT_CONFIGURED")}
+      ${metricBadge("Alarm subsystem", health.alarm_subsystem || "UNKNOWN", health.alarm_subsystem || "UNKNOWN", "Software alarm policy and engine")}
+      ${metricBadge("Physical alarm", health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED", health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED", `Transports: ${formatTransportList(health.physical_alarm_transports)}`, "PHYSICAL_ALARM_NOT_CONFIGURED")}
+      ${metricBadge("Notification worker", health.notification_delivery_worker || "UNKNOWN", health.notification_delivery_worker || "UNKNOWN", health.notification_delivery_last_error ? `Last error: ${health.notification_delivery_last_error}` : "No worker error reported")}
+      ${metricBadge("Safety event worker", health.safety_event_worker || "UNKNOWN", health.safety_event_worker || "UNKNOWN", health.safety_event_worker_last_error ? `Last error: ${health.safety_event_worker_last_error}` : "No worker error reported")}
+    </div>
+    <div class="content-grid"><section class="section"><div class="section-head"><h2>Subsystem status</h2><span>REPORTED STATE</span></div><div class="section-body"><div class="state-list">
+      ${badgeRow("Application process", health.application)}
+      ${badgeRow("Uptime", health.uptime_state || "UPTIME_UNAVAILABLE")}
+      ${badgeRow("Database", health.database)}
+      ${badgeRow("Migrations", health.migrations)}
+      ${badgeRow("Cameras", health.camera_state)}
+      ${badgeRow("Camera health worker", health.camera_health_worker)}
+      ${badgeRow("Safety / escalation worker", health.safety_event_worker || "UNKNOWN")}
+      ${badgeRow("Alarm subsystem", health.alarm_subsystem || "UNKNOWN")}
+      ${badgeRow("Physical alarm output", health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED", "PHYSICAL_ALARM_NOT_CONFIGURED")}
+      ${badgeRow("Physical alarm transports", formatTransportList(health.physical_alarm_transports), "NONE_CONFIGURED")}
+      ${badgeRow("Inference pipeline", health.inference_pipeline)}
+      ${badgeRow("Running pipelines", formatCount(health.running_pipeline_count))}
+      ${badgeRow("Model", health.model_state)}
+      ${badgeRow("Evidence", health.evidence_subsystem)}
+      ${badgeRow("Notifications", health.notification_subsystem)}
+      ${badgeRow("Notification delivery worker", health.notification_delivery_worker || "UNKNOWN")}
+      ${badgeRow("Email transport", health.email_transport || "EMAIL_NOT_CONFIGURED", "EMAIL_NOT_CONFIGURED")}
+      ${badgeRow("WhatsApp transport", health.whatsapp_transport || "WHATSAPP_NOT_CONFIGURED", "WHATSAPP_NOT_CONFIGURED")}
+      ${badgeRow("Disk state", health.disk_state || "DISK_UNAVAILABLE")}
+      ${badgeRow("Disk free percent", health.disk_free_percent ?? "NOT_MEASURED", "NOT_MEASURED")}
+      ${badgeRow("Measured performance", health.measured_performance || "NOT_MEASURED", "NOT_MEASURED")}
+      ${badgeRow("Camera FPS", health.camera_fps ?? "NOT_MEASURED", "NOT_MEASURED")}
+      ${badgeRow("Inference FPS", health.inference_fps ?? "NOT_MEASURED", "NOT_MEASURED")}
+      ${badgeRow("Frontend connectivity", health.frontend_connectivity)}
+      ${badgeRow("IGL validated", health.igl_validated ? "IGL_VALIDATED" : "NOT_VALIDATED")}
+      ${badgeRow("IGL configuration", health.igl_configuration_status || "NOT_AVAILABLE")}
+      ${badgeRow("Access control mode", health.access_control || "NOT_REPORTED")}
+    </div></div></section>
+    <section class="section"><div class="section-head"><h2>Model configuration</h2><span>BACKEND REPORT</span></div><div class="section-body"><div class="state-list">
+      ${badgeRow("Name", model.model_name || "MODEL_NOT_CONFIGURED", "MODEL_NOT_CONFIGURED")}
+      ${badgeRow("Version", model.model_version || "MODEL_NOT_CONFIGURED", "MODEL_NOT_CONFIGURED")}
+      ${badgeRow("Weights loaded", model.weights_loaded ? "WEIGHTS_LOADED" : "MODEL_NOT_CONFIGURED")}
+      ${badgeRow("Classes", model.classes?.length ?? "NOT_AVAILABLE")}
+      ${badgeRow("Confidence threshold", model.confidence_threshold ?? "NOT_CONFIGURED", "NOT_CONFIGURED")}
+      ${badgeRow("Inference count", formatCount(model.inference_count))}
+      ${badgeRow("Inference failures", formatCount(model.inference_failure_count))}
+      ${badgeRow("Average latency", model.average_inference_latency_ms ?? "NOT_MEASURED", "NOT_MEASURED")}
+    </div>${health.degraded_reasons?.length ? `<p class="config-note">Degraded because: ${escapeHtml(health.degraded_reasons.join(", "))}</p>` : `<p class="config-note">No degraded reason is currently reported.</p>`}</div></section></div>`;
 }
 
 async function renderAudit() {
@@ -999,6 +1515,7 @@ async function renderAudit() {
 const renderers = { overview: renderOverview, cameras: renderCameras, workers: renderWorkers, events: renderEvents, incidents: renderIncidents, alarm: renderAlarmCenter, rules: renderRules, notifications: renderNotifications, evidence: renderEvidence, configuration: renderConfiguration, analytics: renderAnalytics, system: renderSystem, audit: renderAudit, unavailable: async () => { content.innerHTML = unavailableMarkup(); } };
 
 async function navigate(view) {
+  if (view !== "workers") stopWorkersPolling();
   if (view !== "cameras") stopBrowserCamera();
   if (view !== "cameras") stopWebcamPolling();
   currentView = view;
@@ -1009,7 +1526,8 @@ async function navigate(view) {
   showMessage("", false);
   content.innerHTML = `<div class="empty-state"><div><strong>Loading current API data</strong>Please wait.</div></div>`;
   try {
-    await (renderers[view] || renderers.unavailable)();
+    const renderSucceeded = await (renderers[view] || renderers.unavailable)();
+    if (view === "workers") startWorkersPolling(renderSucceeded === false ? 10000 : 5000);
     document.querySelector("#last-updated").textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     content.innerHTML = `<section class="section"><div class="empty-state"><div><strong>NOT_AVAILABLE</strong>${escapeHtml(error.message)}</div></div></section>`;

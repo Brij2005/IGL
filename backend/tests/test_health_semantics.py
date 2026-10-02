@@ -21,17 +21,26 @@ from app.models import Camera, CameraHealth, Plant
 from app.services import system_health
 from app.services.inference_pipeline import pipeline_manager
 from app.services.system_health import (
+    ALARM_DISABLED,
+    ALARM_READY,
     APPLICATION_UP,
     CAMERA_AVAILABLE,
     CAMERA_CONFIGURED_NOT_OBSERVED,
     CAMERA_NONE_ACTIVE,
     DATABASE_OK,
     DATABASE_UNAVAILABLE,
+    DISK_LOW,
+    DISK_OK,
+    DISK_UNAVAILABLE,
+    EMAIL_CONFIGURED,
+    EMAIL_NOT_CONFIGURED,
     MIGRATIONS_CURRENT,
     MIGRATIONS_PENDING,
     MODEL_CONFIGURED,
     MODEL_NOT_CONFIGURED,
     NO_CAMERA,
+    WHATSAPP_CONFIGURED,
+    WHATSAPP_NOT_CONFIGURED,
     collect_system_health,
 )
 
@@ -191,6 +200,21 @@ def test_root_endpoint_exposes_explicit_unavailable_states():
     assert payload["migrations"] in {MIGRATIONS_CURRENT, MIGRATIONS_PENDING}
     assert payload["model_state"] in {MODEL_CONFIGURED, MODEL_NOT_CONFIGURED}
     assert payload["camera_state"] in {NO_CAMERA, CAMERA_AVAILABLE, CAMERA_NONE_ACTIVE, CAMERA_CONFIGURED_NOT_OBSERVED}
+    assert payload["safety_event_worker"] in {"RUNNING", "NOT_CONFIGURED", "STOPPED", "STOP_TIMEOUT"}
+    assert payload["alarm_subsystem"] in {ALARM_READY, ALARM_DISABLED}
+    assert payload["physical_alarm_state"] in {"PHYSICAL_ALARM_NOT_CONFIGURED", "ACTUATOR_NOT_CONNECTED"}
+    # Transport health reports configuration only; it never claims a delivery.
+    assert payload["email_transport"] in {EMAIL_CONFIGURED, EMAIL_NOT_CONFIGURED}
+    assert payload["whatsapp_transport"] in {WHATSAPP_CONFIGURED, WHATSAPP_NOT_CONFIGURED}
+    # Uptime and disk are measured, or explicitly reported as unavailable.
+    assert payload["uptime_state"] in {"MEASURED", "UPTIME_UNAVAILABLE"}
+    assert payload["uptime_seconds"] is None or payload["uptime_seconds"] >= 0
+    assert payload["disk_state"] in {DISK_OK, DISK_LOW, DISK_UNAVAILABLE}
+    # Performance is measured from observed frames or not reported at all.
+    assert payload["measured_performance"] in {"MEASURED_FROM_OBSERVED_FRAMES", "NOT_MEASURED_WITHOUT_OBSERVED_FRAMES"}
+    if payload["measured_performance"] == "NOT_MEASURED_WITHOUT_OBSERVED_FRAMES":
+        assert payload["camera_fps"] is None
+        assert payload["inference_fps"] is None
     assert payload["validation_status"] == "NOT_VALIDATED"
     assert payload["igl_validated"] is False
     for value in payload.values():

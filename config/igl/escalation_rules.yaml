@@ -2,8 +2,36 @@ configuration_status: NOT_CONFIGURED
 records: []
 record_schema:
   id: null
+  # Which event classes this policy covers. NULL means every event class.
   event_type: null
-  recipient_role: null
+  # Optional narrowing by the severity the policy is written for.
+  severity: null
+  # Response tiers, lowest first. Each tier names a role and a channel.
+  # Roles this build defines: ADMIN, PLANT_MANAGER, SAFETY_OFFICER, SUPERVISOR, VIEWER.
+  from_role: null
+  to_role: null
   channel: null
-  delay_seconds: null
+  escalation_level: null
+  escalate_after_seconds: null
+  # Notification dedup window in seconds. Prevents a notification storm for one
+  # event without hiding the event itself.
+  dedup_window_seconds: null
+  is_active: null
   source_reference: null
+  approved_by: null
+  approved_at: null
+
+# Alarm policy is configured in the backend environment (ALARM_* and
+# PHYSICAL_ALARM_* in .env) because it governs the live safety path. The
+# operator-facing summary of that policy lives here for review:
+alarm_policy_reference:
+  configuration_status: NOT_CONFIGURED
+  # ALARM_ENABLED, ALARM_MIN_SEVERITY, ALARM_COOLDOWN_SECONDS,
+  # ALARM_MAX_REPEATS_PER_WINDOW, ALARM_REPEAT_WINDOW_SECONDS,
+  # ALARM_AUTO_EXPIRE_SECONDS, ALARM_AUDIBLE_BROWSER, ALARM_PHYSICAL_ACTUATION
+  # are the authoritative values. This block records the plant's intended policy
+  # for approval; it is not read by the runtime.
+  intended_values: null
+  physical_actuator: NOT_CONFIGURED
+  approved_by: null
+  approved_at: null

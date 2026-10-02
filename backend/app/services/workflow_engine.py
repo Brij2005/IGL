@@ -4,8 +4,16 @@ Event state is only ever changed here, and only to a state the transition map
 allows. Acknowledgement and assignment are the two operations that create their
 own domain records, and they advance the event workflow in the same transaction
 so the acknowledgement log and the event state can never disagree.
+
+Two states exist for withdrawing an event from normal handling. ``ESCALATED``
+records that the event was raised past normal handling and can still be
+acknowledged and worked. ``CANCELLED`` closes the event out as a false or
+withdrawn condition: it is terminal, always carries a reason, and stamps the
+event's end time so the event cannot be picked up as open again.
 """
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -28,19 +36,30 @@ except ImportError:
 
 
 ALLOWED_TRANSITIONS = {
-    "NEW": {"UNACKNOWLEDGED"},
-    "UNACKNOWLEDGED": {"ACKNOWLEDGED"},
-    "ACKNOWLEDGED": {"ASSIGNED"},
-    "ASSIGNED": {"UNDER_INVESTIGATION"},
-    "UNDER_INVESTIGATION": {"ACTION_REQUIRED", "RESOLVED"},
-    "ACTION_REQUIRED": {"RESOLVED"},
+    "NEW": {"UNACKNOWLEDGED", "CANCELLED"},
+    "UNACKNOWLEDGED": {"ACKNOWLEDGED", "ESCALATED", "CANCELLED"},
+    "ACKNOWLEDGED": {"ASSIGNED", "ESCALATED", "CANCELLED"},
+    "ASSIGNED": {"UNDER_INVESTIGATION", "CANCELLED"},
+    "UNDER_INVESTIGATION": {"ACTION_REQUIRED", "RESOLVED", "CANCELLED"},
+    "ACTION_REQUIRED": {"RESOLVED", "CANCELLED"},
     "RESOLVED": {"CLOSED"},
+    # ESCALATED means the event was raised past normal handling. It is not a
+    # dead end: from there the event can still be acknowledged and worked, or
+    # withdrawn with a reason.
+    "ESCALATED": {"ACKNOWLEDGED", "CANCELLED"},
+    # CANCELLED is terminal. A cancelled event was closed out as a false or
+    # withdrawn condition, so it is never reopened; a new observation produces a
+    # new event, which is visible as a separate record rather than a rewrite.
+    "CANCELLED": set(),
     "CLOSED": set(),
 }
 
 # The states from which each side-effecting operation may start.
-ACKNOWLEDGABLE_STATES = {"NEW", "UNACKNOWLEDGED"}
+ACKNOWLEDGABLE_STATES = {"NEW", "UNACKNOWLEDGED", "ESCALATED"}
 ASSIGNABLE_STATES = {"ACKNOWLEDGED"}
+
+# States that close an event out and are never eligible for further handling.
+TERMINAL_STATES = frozenset({"CANCELLED", "CLOSED"})
 
 
 class InvalidWorkflowTransition(ValueError):
@@ -64,6 +83,12 @@ def transition_event(
     user_id: str | None,
     reason: str,
 ) -> Event:
+    """Move an event to a state the transition map allows, with a reason.
+
+    A cancelled event is closed out here: its end time is stamped so the
+    duration of the condition is bounded and it can no longer be picked up as an
+    open event. Every other transition only changes the workflow state.
+    """
     if not reason or not reason.strip():
         raise InvalidWorkflowTransition("A transition reason is required")
     previous_state = event.workflow_state
@@ -77,6 +102,8 @@ def transition_event(
         reason=reason.strip(),
     )
     event.workflow_state = new_state
+    if new_state == "CANCELLED" and event.ended_at is None:
+        event.ended_at = datetime.now(timezone.utc)
     db.add(transition)
     db.commit()
     db.refresh(event)

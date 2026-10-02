@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     MODEL_VERSION: str | None = None
     MODEL_CONFIDENCE_THRESHOLD: float = Field(default=0.25, ge=0.0, le=1.0)
     MODEL_DEVICE: str = "cpu"
+    MODEL_IOU_THRESHOLD: float = Field(default=0.7, ge=0.0, le=1.0)
+    MODEL_IMAGE_SIZE: int = Field(default=640, ge=32, le=4096)
+    # Local model discovery only. Discovery scans operator-supplied directories
+    # for a compatible checkpoint; it never downloads weights, and it never
+    # activates a discovered file without an explicit MODEL_WEIGHTS_PATH.
+    MODEL_AUTO_DISCOVER: bool = False
+    MODEL_SEARCH_PATHS: list[str] = Field(default_factory=list)
+    MODEL_SEARCH_MAX_DEPTH: int = Field(default=3, ge=1, le=8)
+    # Warm-up and timed passes used by the model validation command so reported
+    # latency is a real measurement rather than a first-call artefact.
+    MODEL_VALIDATION_WARMUP_PASSES: int = Field(default=2, ge=0, le=50)
+    MODEL_VALIDATION_TIMED_PASSES: int = Field(default=5, ge=1, le=200)
     FRAME_BUFFER_RETENTION_SECONDS: float = Field(default=30.0, gt=0.0, le=3600.0)
     FRAME_BUFFER_MAX_FRAMES: int = Field(default=100, ge=1, le=10000)
     FRAME_BUFFER_MAX_BYTES: int = Field(default=67_108_864, ge=1_048_576)
@@ -110,6 +122,61 @@ class Settings(BaseSettings):
     WEBHOOK_URL: SecretStr | None = None
     WEBHOOK_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.1, le=120.0)
 
+    # Notification message templates. Placeholders are substituted from real
+    # event facts; an unknown placeholder is left visible rather than replaced
+    # with invented content. Templates are plain text by design so an operator
+    # can review exactly what will leave the plant network.
+    EMAIL_INCIDENT_SUBJECT_TEMPLATE: str = "{severity} safety event: {event_type}"
+    EMAIL_INCIDENT_BODY_TEMPLATE: str | None = None
+    EMAIL_ESCALATION_SUBJECT_TEMPLATE: str = "ESCALATED {severity} safety event: {event_type}"
+    EMAIL_ESCALATION_BODY_TEMPLATE: str | None = None
+    EMAIL_TEST_BODY_TEMPLATE: str = "IGL Safety Intelligence operator test message."
+    WHATSAPP_INCIDENT_TEMPLATE: str | None = None
+    WHATSAPP_ESCALATION_TEMPLATE: str | None = None
+    WHATSAPP_TEST_TEMPLATE: str = "IGL Safety Intelligence operator test message."
+
+    # Software alarm policy. An alarm is only ever raised from a real, confirmed
+    # safety event; these values control how loudly and how often that one fact
+    # is repeated, and they are operator-tunable rather than hardcoded.
+    ALARM_ENABLED: bool = True
+    ALARM_MIN_SEVERITY: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "MEDIUM"
+    # Repeated alarms for the same event/rule pair inside this window are
+    # suppressed instead of raised again.
+    ALARM_COOLDOWN_SECONDS: float = Field(default=120.0, ge=0.0, le=86400.0)
+    ALARM_MAX_REPEATS_PER_WINDOW: int = Field(default=3, ge=1, le=100)
+    ALARM_REPEAT_WINDOW_SECONDS: float = Field(default=900.0, gt=0.0, le=86400.0)
+    # An acknowledged alarm stays visible in history; an unacknowledged alarm is
+    # auto-expired after this period so the board cannot fill with stale alarms.
+    ALARM_AUTO_EXPIRE_SECONDS: float = Field(default=1800.0, gt=0.0, le=86400.0)
+    ALARM_AUDIBLE_BROWSER: bool = True
+    ALARM_PHYSICAL_ACTUATION: bool = False
+
+    # Physical alarm actuation. Every transport is opt-in and defaults to
+    # unconfigured, which the health layer reports as
+    # PHYSICAL_ALARM_NOT_CONFIGURED. An actuator is only reported ACTIVATED
+    # after the real transport call returns success.
+    PHYSICAL_ALARM_HTTP_URL: SecretStr | None = None
+    PHYSICAL_ALARM_HTTP_METHOD: Literal["POST", "PUT"] = "POST"
+    PHYSICAL_ALARM_HTTP_BEARER_TOKEN: SecretStr | None = None
+    PHYSICAL_ALARM_HTTP_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.1, le=120.0)
+    PHYSICAL_ALARM_MQTT_HOST: str | None = None
+    PHYSICAL_ALARM_MQTT_PORT: int = Field(default=1883, ge=1, le=65535)
+    PHYSICAL_ALARM_MQTT_TOPIC: str | None = None
+    PHYSICAL_ALARM_MQTT_USERNAME: str | None = None
+    PHYSICAL_ALARM_MQTT_PASSWORD: SecretStr | None = None
+    PHYSICAL_ALARM_MQTT_USE_TLS: bool = False
+    PHYSICAL_ALARM_SERIAL_PORT: str | None = None
+    PHYSICAL_ALARM_SERIAL_BAUD: int = Field(default=9600, ge=1200, le=115200)
+    PHYSICAL_ALARM_SERIAL_PULSE_SECONDS: float = Field(default=2.0, gt=0.0, le=60.0)
+    PHYSICAL_ALARM_GPIO_PIN: int = Field(default=0, ge=0, le=40)
+    PHYSICAL_ALARM_GPIO_ACTIVE_HIGH: bool = True
+
+    # System health thresholds. The disk check reports real free space; it never
+    # claims a healthy volume it could not measure.
+    HEALTH_DISK_PATH: str | None = None
+    HEALTH_DISK_MIN_FREE_BYTES: int = Field(default=536_870_912, ge=0)
+    HEALTH_DISK_MIN_FREE_PERCENT: float = Field(default=5.0, ge=0.0, le=100.0)
+
     # Correlation. Larger values are truncated to this bound before hashing.
     MAX_REQUEST_ID_LENGTH: int = Field(default=64, ge=8, le=256)
 
@@ -124,6 +191,15 @@ class Settings(BaseSettings):
     # Correlation window applied when a detector configuration does not specify
     # one. Correlation never invents events; it only groups persisted ones.
     EVENT_CORRELATION_WINDOW_SECONDS: int = Field(default=300, ge=1, le=86400)
+
+    # Per-rule debounce and cooldown defaults. A rule configured with its own
+    # values in DetectorConfig.parameters_json overrides these. Debounce is the
+    # minimum spacing between two newly created candidate events for the same
+    # rule, zone and track; cooldown suppresses re-raising a rule for a track
+    # after an event has already been raised for it. Both exist to stop a
+    # single sustained condition from producing an incident storm.
+    SAFETY_RULE_DEBOUNCE_SECONDS: float = Field(default=5.0, ge=0.0, le=3600.0)
+    SAFETY_RULE_COOLDOWN_SECONDS: float = Field(default=60.0, ge=0.0, le=86400.0)
 
     # Safety event worker: evaluates correlation and escalation for persisted
     # events. 0 disables the worker entirely.
@@ -178,6 +254,13 @@ class Settings(BaseSettings):
         smtp_password = self.SMTP_PASSWORD.get_secret_value().strip() if self.SMTP_PASSWORD else ""
         if bool(self.SMTP_USERNAME) != bool(smtp_password):
             raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be configured together")
+        if self.MODEL_AUTO_DISCOVER and not self.MODEL_SEARCH_PATHS:
+            raise ValueError("MODEL_AUTO_DISCOVER requires at least one MODEL_SEARCH_PATHS entry")
+        if self.PHYSICAL_ALARM_MQTT_HOST and not self.PHYSICAL_ALARM_MQTT_TOPIC:
+            raise ValueError("PHYSICAL_ALARM_MQTT_HOST requires PHYSICAL_ALARM_MQTT_TOPIC")
+        mqtt_password = self.PHYSICAL_ALARM_MQTT_PASSWORD.get_secret_value() if self.PHYSICAL_ALARM_MQTT_PASSWORD else ""
+        if bool(self.PHYSICAL_ALARM_MQTT_USERNAME) != bool(mqtt_password):
+            raise ValueError("PHYSICAL_ALARM_MQTT_USERNAME and PHYSICAL_ALARM_MQTT_PASSWORD must be configured together")
 
         return self
 

@@ -43,13 +43,18 @@ class InvalidStateTransition(ValueError):
 
 
 # An incident is opened from a real observation, investigated, then resolved and
-# closed. CLOSED is terminal: a closed incident is reopened by a new incident
-# linked to the same event, never by silently rewinding this one.
+# closed. ESCALATED records that the incident was raised past normal handling and
+# can still be worked. CANCELLED closes the incident out as a false or withdrawn
+# condition and is terminal. CLOSED is terminal too: a closed incident is
+# reopened by a new incident linked to the same event, never by silently
+# rewinding this one.
 INCIDENT_TRANSITIONS: dict[str, set[str]] = {
-    "OPEN": {"INVESTIGATING", "RESOLVED"},
-    "INVESTIGATING": {"RESOLVED", "OPEN"},
+    "OPEN": {"INVESTIGATING", "RESOLVED", "ESCALATED", "CANCELLED"},
+    "INVESTIGATING": {"RESOLVED", "OPEN", "ESCALATED", "CANCELLED"},
+    "ESCALATED": {"INVESTIGATING", "RESOLVED", "CANCELLED"},
     "RESOLVED": {"CLOSED", "INVESTIGATING"},
     "CLOSED": set(),
+    "CANCELLED": set(),
 }
 
 NEAR_MISS_TRANSITIONS: dict[str, set[str]] = {
@@ -120,7 +125,12 @@ def transition_incident(
     user_id: str | None,
     reason: str,
 ) -> Incident:
-    """Move an incident to an allowed state and record the transition."""
+    """Move an incident to an allowed state and record the transition.
+
+    Every transition requires a reason, including a cancellation: an incident
+    closed out as false or withdrawn is only meaningful with the stated reason
+    recorded against it.
+    """
     previous_state = incident.status
     cleaned_reason = _apply(incident, INCIDENT_TRANSITIONS, new_state, reason=reason, user_id=user_id)
     db.add(IncidentStateTransition(

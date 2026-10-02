@@ -16,11 +16,15 @@ from sqlalchemy.orm import Session
 try:
     from app.config import settings
     from app.models import Event, Notification, Role, User
-    from app.services.notification_engine import due_notifications, record_attempt
+    # delivery_status_for is re-exported here so callers can read the external
+    # delivery vocabulary from the delivery module alone.
+    from app.services.notification_engine import delivery_status_for, due_notifications, record_attempt
+    from app.services.notification_templates import message_kind, render_email, render_whatsapp
 except ImportError:  # pragma: no cover
     from backend.app.config import settings
     from backend.app.models import Event, Notification, Role, User
-    from backend.app.services.notification_engine import due_notifications, record_attempt
+    from backend.app.services.notification_engine import delivery_status_for, due_notifications, record_attempt
+    from backend.app.services.notification_templates import message_kind, render_email, render_whatsapp
 
 
 logger = logging.getLogger("igl.notifications.delivery")
@@ -109,21 +113,45 @@ def send_whatsapp(recipient: str, body: str) -> dict[str, Any]:
         return _result("DELIVERY_FAILED", "WHATSAPP_CLOUD_API", f"PROVIDER_{type(exc).__name__.upper()}")
 
 
+def _log_unsubstituted(channel: str, names: list[str]) -> None:
+    """Record template gaps by name only; values are never logged."""
+    if names:
+        logger.warning(
+            "Notification template left placeholders unsubstituted",
+            extra={"component": "notification_delivery", "channel": channel, "placeholders": ",".join(names)},
+        )
+
+
+def _event_for(db: Session, notification: Notification) -> Event | None:
+    if not notification.event_id:
+        return None
+    return db.query(Event).filter(Event.id == notification.event_id).first()
+
+
 def _event_message(db: Session, notification: Notification) -> tuple[str, str]:
-    event = db.query(Event).filter(Event.id == notification.event_id).first() if notification.event_id else None
+    """Render the operator-visible message for a queued event notification.
+
+    An event-backed row is rendered from that event's real facts through the
+    configured template; a row without an event falls back to the queued payload
+    summary. A placeholder with no fact stays visible and is logged by name.
+    """
+    event = _event_for(db, notification)
     if event is None:
         return "IGL Safety Intelligence notification", notification.payload_summary or "Operator test notification."
-    subject = f"{event.severity} safety event: {event.event_type}"
-    body = (
-        f"Safety event: {event.event_type}\nSeverity: {event.severity}\n"
-        f"State: {event.workflow_state}\nEvent ID: {event.id}\n"
-        f"Started at: {event.started_at.isoformat()}\n"
-        f"Camera ID: {event.camera_id}\n"
-        f"Confidence: {event.confidence if event.confidence is not None else 'NOT_MEASURED'}"
-    )
-    if event.zone_id:
-        body += f"\nZone ID: {event.zone_id}"
-    return subject, body
+    message = render_email(message_kind(event), event)
+    _log_unsubstituted(notification.channel, message.not_substituted)
+    return message.subject, message.body
+
+
+def test_message(channel: str) -> tuple[str, str]:
+    """Render the operator test message for a channel from the templates."""
+    if channel == "WHATSAPP":
+        message = render_whatsapp("TEST")
+        _log_unsubstituted("WHATSAPP", message.not_substituted)
+        return message.body, message.body
+    message = render_email("TEST")
+    _log_unsubstituted("EMAIL", message.not_substituted)
+    return message.subject, message.body
 
 
 def _email_recipients(db: Session, notification: Notification) -> list[str]:
@@ -156,10 +184,10 @@ def _whatsapp_recipients(notification: Notification) -> list[str]:
 
 def deliver_notification(db: Session, notification: Notification) -> dict[str, Any]:
     """Attempt delivery through a configured transport; returns provider facts."""
-    subject, body = _event_message(db, notification)
-    if notification.payload_summary:
-        body += f"\n\nDetails: {notification.payload_summary}"
     if notification.channel == "EMAIL":
+        subject, body = _event_message(db, notification)
+        if notification.payload_summary:
+            body += f"\n\nDetails: {notification.payload_summary}"
         recipients = _email_recipients(db, notification)
         if not recipients:
             return _result("EMAIL_NOT_CONFIGURED", "SMTP", "No email recipient is configured")
@@ -168,13 +196,29 @@ def deliver_notification(db: Session, notification: Notification) -> dict[str, A
         recipients = _whatsapp_recipients(notification)
         if not recipients:
             return _result("WHATSAPP_NOT_CONFIGURED", "WHATSAPP_CLOUD_API", "No WhatsApp recipient is configured")
-        outcomes = [send_whatsapp(recipient, f"{subject}\n{body}") for recipient in recipients]
+        body = _whatsapp_message(db, notification)
+        outcomes = [send_whatsapp(recipient, body) for recipient in recipients]
         failed = [outcome for outcome in outcomes if outcome["status"] != "SENT"]
         if failed:
             return _result("DELIVERY_FAILED", "WHATSAPP_CLOUD_API", failed[0]["error"])
         ids = ",".join(outcome["message_id"] for outcome in outcomes if outcome.get("message_id")) or None
         return _result("SENT", "WHATSAPP_CLOUD_API", message_id=ids)
     return _result("NOT_IMPLEMENTED", notification.channel, "No sender is implemented for this channel")
+
+
+def _whatsapp_message(db: Session, notification: Notification) -> str:
+    """Render the WhatsApp text for a queued row from real event facts."""
+    event = _event_for(db, notification)
+    if event is None:
+        message = render_whatsapp("INCIDENT", None)
+        body = notification.payload_summary or "IGL Safety Intelligence notification"
+    else:
+        message = render_whatsapp(message_kind(event), event)
+        body = message.body
+    _log_unsubstituted("WHATSAPP", message.not_substituted)
+    if notification.payload_summary:
+        body += f"\n\nDetails: {notification.payload_summary}"
+    return body
 
 
 def deliver_due_notifications(db: Session, limit: int = 25) -> dict[str, int]:

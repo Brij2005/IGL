@@ -44,16 +44,22 @@ from app.models import (  # noqa: E402
     User,
     Zone
 )
+from app.config import settings  # noqa: E402
 from app.services.correlation_engine import correlate_event, correlation_summary, repeat_event_summary  # noqa: E402
 from app.services.escalation_engine import evaluate_event_escalation  # noqa: E402
 from app.services.safety_engine import (  # noqa: E402
     DETECTOR_CATALOGUE,
+    MODEL_CLASS_NOT_AVAILABLE,
     detector_capabilities,
+    detector_rule_parameters,
     evaluate_frame_class_detector,
     evaluate_restricted_zone,
+    matched_class_candidate,
     verification_policy_from_configuration
 )
 from app.services.safety_orchestrator import SafetyEventOrchestrator  # noqa: E402
+from app.services.workflow_engine import transition_event  # noqa: E402
+
 from app.services.safety_event_worker import enqueue_escalation_notifications  # noqa: E402
 from app.services.safety_engine import temporal_registry  # noqa: E402
 
@@ -179,7 +185,7 @@ def test_every_catalogue_detector_reports_an_explicit_state():
             "MODEL_NAME_REQUIRED",
             "MODEL_VERSION_REQUIRED",
             "MODEL_LOAD_FAILED",
-            "DETECTOR_NOT_SUPPORTED_BY_MODEL",
+            "MODEL_CLASS_NOT_AVAILABLE",
             "NOT_AVAILABLE"
         )
         assert capability.reason
@@ -196,11 +202,12 @@ def test_unsupported_detectors_are_never_operational():
         assert capability.reason
 
     # This model has no smoke class, so the implemented smoke detector cannot run.
-    assert capabilities["SMOKE"].availability_state == "DETECTOR_NOT_SUPPORTED_BY_MODEL"
+    assert capabilities["SMOKE"].availability_state == "MODEL_CLASS_NOT_AVAILABLE"
     assert capabilities["SMOKE"].operational is False
     # It does expose person and fire.
     assert capabilities["FIRE"].operational is True
     assert capabilities["RESTRICTED_ZONE"].operational is True
+    assert capabilities["PERSON"].operational is True
 
 
 def test_no_model_means_no_detector_is_operational():
@@ -990,3 +997,532 @@ def test_request_id_header_is_preserved(client, topology):
     assert response.status_code == 200
     assert response.headers["X-Request-ID"] == "fixture-request-1"
 
+
+# ---------------------------------------------------------------------------
+# J. Class-gated detectors: PERSON and PHONE
+# ---------------------------------------------------------------------------
+
+# Unit stub. This is a hand-written model-health payload used only to exercise
+# the capability decision that reads the model's own class list. It is not a
+# model, it names no weights file that exists in this repository, and nothing in
+# this section asserts that a person or a phone was ever detected.
+PHONE_MODEL_HEALTH_STUB = {
+    "status": "READY",
+    "available": True,
+    "model_name": "stub-model",
+    "model_version": "stub-v0",
+    "weights_checksum_sha256": "f" * 64,
+    "classes": ["person", "cell phone", "fire"],
+    "confidence_threshold": 0.25,
+}
+
+
+def test_person_and_phone_are_in_the_catalogue_and_gate_on_the_model_class():
+    """A class-based detector exists in the build but only runs for a class the model has."""
+    assert "PERSON" in DETECTOR_CATALOGUE
+    assert "PHONE" in DETECTOR_CATALOGUE
+    capabilities = {c.detector_key: c for c in detector_capabilities(MODEL_HEALTH, [])}
+
+    # This model has no phone class, so the PHONE detector cannot run on it.
+    phone = capabilities["PHONE"]
+    assert phone.implementation_state == "IMPLEMENTED"
+    assert phone.availability_state == MODEL_CLASS_NOT_AVAILABLE
+    assert phone.operational is False
+    assert phone.detection_capability == "CLASS_PRESENCE_IN_FRAME"
+    assert phone.reason
+
+    # This model does expose a person class, so PERSON is supported by it. It is
+    # still not operational, because no operator has configured the rule.
+    person = capabilities["PERSON"]
+    assert person.implementation_state == "IMPLEMENTED"
+    assert person.availability_state == "READY"
+    assert person.configured is False
+    assert person.operational is True
+
+
+def test_class_gated_detector_is_not_claimed_without_any_model():
+    """No weights file ships with this repo, so nothing can be operational."""
+    capabilities = {
+        c.detector_key: c for c in detector_capabilities(
+            {"status": "MODEL_NOT_CONFIGURED", "available": False, "classes": []}, configs=[]
+        )
+    }
+    for detector_key in ("PERSON", "PHONE"):
+        capability = capabilities[detector_key]
+        assert capability.implementation_state == "IMPLEMENTED"
+        assert capability.availability_state == "MODEL_NOT_CONFIGURED"
+        assert capability.operational is False
+        assert capability.health["model_available"] is False
+        assert capability.health["igl_validation_status"] == "NOT_VALIDATED"
+
+
+def test_person_and_phone_become_operational_when_the_stub_model_exposes_the_class():
+    """The only thing that changes is the class list the stub model reports."""
+    capabilities = {c.detector_key: c for c in detector_capabilities(PHONE_MODEL_HEALTH_STUB, [])}
+    for detector_key in ("PERSON", "PHONE"):
+        capability = capabilities[detector_key]
+        assert capability.availability_state == "READY"
+        assert capability.operational is True
+        assert capability.health["required_classes_present"] is True
+        assert capability.health["model_class_count"] == 3
+        assert capability.validation_state == "NOT_CONFIGURED"
+
+    # Removing the class from the same stub payload takes the capability away
+    # again, which shows the decision is taken from that list alone.
+    without_phone = {
+        c.detector_key: c for c in detector_capabilities(
+            {**PHONE_MODEL_HEALTH_STUB, "classes": ["person", "fire"]}, []
+        )
+    }
+    assert without_phone["PHONE"].availability_state == MODEL_CLASS_NOT_AVAILABLE
+    assert without_phone["PHONE"].operational is False
+
+
+def test_unimplemented_detectors_are_never_claimed_by_any_model_stub():
+    """No model this build could load makes an absence-based detector runnable."""
+    capabilities = {c.detector_key: c for c in detector_capabilities(PHONE_MODEL_HEALTH_STUB, [])}
+    for detector_key in ("PPE", "HELMET", "SAFETY_VEST", "PROXIMITY", "FALL", "LEAKAGE", "UNSAFE_BEHAVIOR"):
+        capability = capabilities[detector_key]
+        assert capability.implementation_state == "NOT_IMPLEMENTED"
+        assert capability.availability_state == "NOT_AVAILABLE"
+        assert capability.operational is False
+        assert capability.detection_capability == "NONE"
+        assert capability.health["required_classes_present"] is None
+        assert capability.reason
+
+
+def test_phone_class_matching_excludes_lookalike_labels():
+    """A wearable or fixed-line handset is not the mobile phone this rule is about."""
+    assert matched_class_candidate("PHONE", "cell phone") == "cell phone"
+    assert matched_class_candidate("PHONE", "mobile phone") == "mobile phone"
+    assert matched_class_candidate("PHONE", "headphones") is None
+    assert matched_class_candidate("PHONE", "telephone") is None
+    assert matched_class_candidate("PHONE", "person") is None
+    assert matched_class_candidate("PERSON", "person") == "person"
+    assert matched_class_candidate("PERSON", "fire") is None
+
+
+def test_detector_api_reports_the_new_detectors_honestly(client, topology):
+    _db, _camera, _zone, _officer = topology
+    response = client.get("/api/v1/system/detectors")
+    assert response.status_code == 200
+    by_key = {detector["detector_key"]: detector for detector in response.json()["detectors"]}
+    assert by_key["PERSON"]["implementation_state"] == "IMPLEMENTED"
+    assert by_key["PHONE"]["implementation_state"] == "IMPLEMENTED"
+    # The process has no weights file loaded, so neither may be reported as
+    # operational whatever the catalogue says.
+    assert by_key["PERSON"]["operational"] is False
+    assert by_key["PHONE"]["operational"] is False
+    assert by_key["PHONE"]["detection_capability"] == "CLASS_PRESENCE_IN_FRAME"
+    assert by_key["PHONE"]["health"]["igl_validation_status"] == "NOT_VALIDATED"
+
+
+# ---------------------------------------------------------------------------
+# J2. Per-rule parameters
+# ---------------------------------------------------------------------------
+
+def test_effective_rule_falls_back_to_labelled_engineering_defaults(topology):
+    """An unconfigured rule reports the defaults as defaults, never as IGL values."""
+    db, camera, _zone, _officer = topology
+    rule = detector_rule_parameters("FIRE", db.query(DetectorConfig).all(), db.query(OperatingThreshold).all())
+    assert rule.minimum_confidence == pytest.approx(float(settings.MODEL_CONFIDENCE_THRESHOLD), abs=1e-6) or rule.minimum_confidence == pytest.approx(0.25, abs=1e-6)
+    assert rule.debounce_seconds == settings.SAFETY_RULE_DEBOUNCE_SECONDS
+    assert rule.cooldown_seconds == settings.SAFETY_RULE_COOLDOWN_SECONDS
+    assert rule.evidence_policy == "CAPTURE"
+    assert rule.zone_scoping == "ALL"
+    assert rule.severity == "CRITICAL"
+    assert set(rule.sources.values()) == {"ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION"}
+    assert all(reference is None for reference in rule.references.values())
+
+
+def test_effective_rule_reads_configured_parameters_with_provenance(topology):
+    db, camera, _zone, _officer = topology
+    db.add(DetectorConfig(
+        detector_key="RESTRICTED_ZONE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json={
+            "confidence_threshold": 0.55,
+            "debounce_seconds": 12.0,
+            "cooldown_seconds": 180.0,
+            "evidence_policy": "SKIP",
+            "zone_scoping": "ZONE-OPERATOR-SCOPED",
+            "severity": "CRITICAL",
+        },
+        threshold_source="CONFIGURED",
+        source_reference="IGL-SOP-ZONE-DEBOUNCE-001",
+    ))
+    db.commit()
+    rule = detector_rule_parameters(
+        "RESTRICTED_ZONE", db.query(DetectorConfig).all(), db.query(OperatingThreshold).all()
+    )
+    assert rule.minimum_confidence == pytest.approx(0.55)
+    assert rule.debounce_seconds == pytest.approx(12.0)
+    assert rule.cooldown_seconds == pytest.approx(180.0)
+    assert rule.evidence_policy == "SKIP"
+    assert rule.zone_scoping == "ZONE-OPERATOR-SCOPED"
+    assert rule.severity == "CRITICAL"
+    for parameter in ("minimum_confidence", "debounce_seconds", "cooldown_seconds", "evidence_policy"):
+        assert rule.source_for(parameter) == "CONFIGURED"
+        assert rule.references[parameter] == "IGL-SOP-ZONE-DEBOUNCE-001"
+
+
+def test_effective_rule_reads_matching_operating_threshold_codes(topology):
+    db, camera, _zone, _officer = topology
+    db.add(OperatingThreshold(
+        code="PERSON.debounce_seconds",
+        metric="rule_debounce_seconds",
+        value=30.0,
+        zone_id=camera.zone_id,
+        threshold_source="CONFIGURED",
+        source_reference="IGL-SOP-PERSON-001",
+    ))
+    db.add(OperatingThreshold(
+        code="PERSON.confidence_threshold",
+        metric="detection_confidence",
+        value=0.7,
+        zone_id=camera.zone_id,
+        threshold_source="CONFIGURED",
+        source_reference="IGL-SOP-PERSON-002",
+    ))
+    db.commit()
+    rule = detector_rule_parameters("PERSON", db.query(DetectorConfig).all(), db.query(OperatingThreshold).all())
+    assert rule.debounce_seconds == pytest.approx(30.0)
+    assert rule.minimum_confidence == pytest.approx(0.7)
+    assert rule.source_for("debounce_seconds") == "CONFIGURED"
+
+
+def test_unrecognised_evidence_policy_falls_back_and_says_so(topology):
+    db, camera, _zone, _officer = topology
+    db.add(DetectorConfig(
+        detector_key="FIRE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json={"evidence_policy": "capture_later_maybe"},
+    ))
+    db.commit()
+    rule = detector_rule_parameters("FIRE", db.query(DetectorConfig).all(), db.query(OperatingThreshold).all())
+    assert rule.evidence_policy == "CAPTURE"
+    assert rule.source_for("evidence_policy") == "ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION"
+    assert any("evidence_policy" in note for note in rule.notes)
+
+
+def test_out_of_range_parameter_is_clamped_and_reported(topology):
+    db, camera, _zone, _officer = topology
+    db.add(DetectorConfig(
+        detector_key="FIRE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json={"minimum_confidence": 4.2, "debounce_seconds": -1.0},
+    ))
+    db.commit()
+    rule = detector_rule_parameters("FIRE", db.query(DetectorConfig).all(), db.query(OperatingThreshold).all())
+    assert rule.minimum_confidence == pytest.approx(1.0)
+    assert rule.debounce_seconds == pytest.approx(0.0)
+    assert len(rule.notes) == 2
+
+
+def test_capability_reports_configuration_health_and_validation_state(topology):
+    """The UI must be able to show the real configuration, not a claim about it."""
+    db, camera, _zone, _officer = topology
+    db.add(DetectorConfig(
+        detector_key="RESTRICTED_ZONE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json={"debounce_seconds": 20.0, "cooldown_seconds": 240.0, "evidence_policy": "SKIP"},
+        threshold_source="CONFIGURED",
+        source_reference="IGL-SOP-ZONE-002",
+    ))
+    db.add(OperatingThreshold(
+        code="RESTRICTED_ZONE.minimum_confidence",
+        metric="detection_confidence",
+        value=0.45,
+        camera_id=camera.id,
+        threshold_source="CONFIGURED",
+        source_reference="IGL-SOP-ZONE-003",
+    ))
+    db.commit()
+    capabilities = {
+        capability.detector_key: capability for capability in detector_capabilities(
+            MODEL_HEALTH, db.query(DetectorConfig).all(), db.query(OperatingThreshold).all()
+        )
+    }
+    capability = capabilities["RESTRICTED_ZONE"]
+    assert capability.enabled is True
+    assert capability.configured is True
+    assert capability.validation_state == "NOT_VALIDATED"
+    effective = capability.configuration["effective_rule"]
+    assert effective["debounce_seconds"] == pytest.approx(20.0)
+    assert effective["cooldown_seconds"] == pytest.approx(240.0)
+    assert effective["evidence_policy"] == "SKIP"
+    assert effective["minimum_confidence"] == pytest.approx(0.45)
+    assert effective["source_references"]["minimum_confidence"] == "IGL-SOP-ZONE-003"
+    assert capability.health["model_status"] == "READY"
+    assert capability.health["model_class_count"] == 2
+    assert capability.as_dict()["configuration"]["effective_rule"] == effective
+
+
+# ---------------------------------------------------------------------------
+# K. Debounce, cooldown, evidence policy and zone scoping in the orchestrator
+# ---------------------------------------------------------------------------
+
+def _tracked_zone_config(db, camera, **parameters):
+    payload = {
+        "minimum_observations": 1,
+        "minimum_duration_seconds": 0.0,
+        "maximum_gap_seconds": 5.0,
+        "minimum_confidence": 0.25,
+    }
+    payload.update(parameters)
+    db.add(DetectorConfig(
+        detector_key="RESTRICTED_ZONE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json=payload,
+        threshold_source="CONFIGURED",
+        source_reference="FIXTURE-ZONE-RULE",
+    ))
+    db.commit()
+
+
+def _run_tracked_frame(db, camera, orchestrator, track, timestamp, bbox=(300, 200, 400, 380)):
+    detection = make_detection(camera.id, "person", 0.9, bbox, timestamp)
+    track = FakeTrack(track.track_id, bbox, 0.9, timestamp=timestamp)
+    return orchestrator.evaluate_frame(
+        db, camera, timestamp=timestamp, frame=frame(), detections=[detection], tracks=[track],
+        model_health=MODEL_HEALTH,
+    )
+
+
+def _close_event(db, event, at):
+    """Take an event out of the open set, the way handling an event would."""
+    event.workflow_state = "RESOLVED"
+    event.ended_at = at
+    db.commit()
+
+
+def test_debounce_stops_a_duplicate_event_for_the_same_track(topology):
+    db, camera, zone, _officer = topology
+    _tracked_zone_config(db, camera, debounce_seconds=30.0, cooldown_seconds=0.0)
+    orchestrator = SafetyEventOrchestrator(capture_evidence=False)
+    temporal_registry.reset()
+    detection = make_detection(camera.id, "person", 0.9, (300, 200, 400, 380), NOW)
+    track = FakeTrack("track-debounce", (300, 200, 400, 380), 0.9, timestamp=NOW)
+    orchestrator.persist_detections(db, camera, [detection], [track])
+
+    first = _run_tracked_frame(db, camera, orchestrator, track, NOW)
+    assert first["events"][0]["status"] == "EVENT_CREATED"
+    event = db.query(Event).one()
+
+    # The event is handled, then the same tracked subject is observed again well
+    # inside the debounce window.
+    _close_event(db, event, NOW + timedelta(seconds=1))
+    second = _run_tracked_frame(db, camera, orchestrator, track, NOW + timedelta(seconds=10))
+    assert second["events"][0]["status"] == "SUPPRESSED_DEBOUNCE"
+    assert second["events"][0]["suppressed"] is True
+    assert second["events"][0]["event_created"] is False
+    assert second["events"][0]["debounce_seconds"] == pytest.approx(30.0)
+    assert "debounce" in second["events"][0]["suppression_reason"]
+    assert db.query(Event).count() == 1
+
+    # Past the debounce window a new candidate event is created again.
+    third = _run_tracked_frame(db, camera, orchestrator, track, NOW + timedelta(seconds=45))
+    assert third["events"][0]["status"] == "EVENT_CREATED"
+    assert db.query(Event).count() == 2
+
+
+def test_debounce_window_of_zero_creates_the_next_event(topology):
+    """A rule that does not debounce still records one event per candidate."""
+    db, camera, _zone, _officer = topology
+    _tracked_zone_config(db, camera, debounce_seconds=0.0, cooldown_seconds=0.0)
+    orchestrator = SafetyEventOrchestrator(capture_evidence=False)
+    temporal_registry.reset()
+    detection = make_detection(camera.id, "person", 0.9, (300, 200, 400, 380), NOW)
+    track = FakeTrack("track-no-debounce", (300, 200, 400, 380), 0.9, timestamp=NOW)
+    orchestrator.persist_detections(db, camera, [detection], [track])
+
+    orchestrator.evaluate_frame(
+        db, camera, timestamp=NOW, frame=frame(), detections=[detection], tracks=[track], model_health=MODEL_HEALTH
+    )
+    _close_event(db, db.query(Event).one(), NOW + timedelta(seconds=1))
+    report = _run_tracked_frame(db, camera, orchestrator, track, NOW + timedelta(seconds=2))
+    assert report["events"][0]["status"] == "EVENT_CREATED"
+    assert db.query(Event).count() == 2
+
+
+def test_cooldown_suppresses_a_new_event_for_the_same_track(topology):
+    db, camera, _zone, _officer = topology
+    _tracked_zone_config(db, camera, debounce_seconds=0.0, cooldown_seconds=120.0)
+    orchestrator = SafetyEventOrchestrator(capture_evidence=False)
+    temporal_registry.reset()
+    detection = make_detection(camera.id, "person", 0.9, (300, 200, 400, 380), NOW)
+    track = FakeTrack("track-cooldown", (300, 200, 400, 380), 0.9, timestamp=NOW)
+    orchestrator.persist_detections(db, camera, [detection], [track])
+
+    first = _run_tracked_frame(db, camera, orchestrator, track, NOW)
+    assert first["events"][0]["status"] == "EVENT_CREATED"
+    event = db.query(Event).one()
+    _close_event(db, event, NOW + timedelta(seconds=1))
+
+    suppressed = _run_tracked_frame(db, camera, orchestrator, track, NOW + timedelta(seconds=30))
+    outcome = suppressed["events"][0]
+    assert outcome["status"] == "SUPPRESSED_COOLDOWN"
+    assert outcome["suppressed"] is True
+    assert outcome["cooldown_seconds"] == pytest.approx(120.0)
+    assert "cooldown" in outcome["suppression_reason"]
+    # The observation was still verified and still reported; only the event is
+    # suppressed, so the condition does not disappear from the report.
+    assert outcome["verification_state"] in ("VERIFIED", "PERSISTED", "DETECTED")
+    assert db.query(Event).count() == 1
+
+    # Past the cooldown window the condition is recorded again.
+    after = _run_tracked_frame(db, camera, orchestrator, track, NOW + timedelta(seconds=150))
+    assert after["events"][0]["status"] == "EVENT_CREATED"
+    assert db.query(Event).count() == 2
+
+
+def test_debounce_and_cooldown_do_not_apply_without_a_tracked_subject(topology):
+    """A frame-level detector has no track to key the windows on, so repeats correlate."""
+    db, camera, _zone, _officer = topology
+    db.add(DetectorConfig(
+        detector_key="FIRE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json={"minimum_observations": 1, "minimum_duration_seconds": 0.0},
+    ))
+    db.commit()
+    orchestrator = SafetyEventOrchestrator(capture_evidence=False)
+    temporal_registry.reset()
+    for offset in (0, 30):
+        detection = make_detection(camera.id, "fire", 0.9, (5, 5, 60, 60), NOW + timedelta(seconds=offset))
+        orchestrator.evaluate_frame(
+            db, camera, timestamp=NOW + timedelta(seconds=offset), frame=frame(),
+            detections=[detection], tracks=[], model_health=MODEL_HEALTH,
+        )
+        for event in db.query(Event).all():
+            _close_event(db, event, NOW + timedelta(seconds=offset + 1))
+    # The default 60s cooldown does not apply: there is no tracked subject, and
+    # the repeat is carried by correlation instead.
+    assert db.query(Event).count() == 2
+    assert len(correlation_summary(db)[0]["correlation_key"]) > 0
+
+
+def test_cancelled_event_is_not_reused_for_a_later_observation(topology):
+    """A withdrawn event must never be silently resurrected by a new observation."""
+    db, camera, _zone, _officer = topology
+    _tracked_zone_config(db, camera, debounce_seconds=0.0, cooldown_seconds=0.0)
+    orchestrator = SafetyEventOrchestrator(capture_evidence=False)
+    temporal_registry.reset()
+    detection = make_detection(camera.id, "person", 0.9, (300, 200, 400, 380), NOW)
+    track = FakeTrack("track-cancelled", (300, 200, 400, 380), 0.9, timestamp=NOW)
+    orchestrator.persist_detections(db, camera, [detection], [track])
+    orchestrator.evaluate_frame(
+        db, camera, timestamp=NOW, frame=frame(), detections=[detection], tracks=[track], model_health=MODEL_HEALTH
+    )
+    cancelled = db.query(Event).one()
+    transition_event(db, cancelled, "CANCELLED", user_id=None, reason="Fixture: withdrawn as a false trigger")
+
+    report = _run_tracked_frame(db, camera, orchestrator, track, NOW + timedelta(seconds=20))
+    assert report["events"][0]["status"] == "EVENT_CREATED"
+    assert report["events"][0]["event_id"] != cancelled.id
+    assert cancelled.workflow_state == "CANCELLED"
+    assert db.query(Event).count() == 2
+
+
+def test_evidence_policy_skip_is_honoured_for_a_real_frame(topology, tmp_path, monkeypatch):
+    from app.services.evidence_engine import EvidenceEngine
+    import app.services.safety_orchestrator as orchestrator_module
+
+    db, camera, _zone, _officer = topology
+    db.add(DetectorConfig(
+        detector_key="FIRE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json={
+            "minimum_observations": 1,
+            "minimum_duration_seconds": 0.0,
+            "minimum_confidence": 0.25,
+            "evidence_policy": "SKIP",
+        },
+        threshold_source="CONFIGURED",
+        source_reference="FIXTURE-EVIDENCE-RULE",
+    ))
+    db.commit()
+    monkeypatch.setattr(orchestrator_module, "evidence_engine", EvidenceEngine(tmp_path))
+    orchestrator = SafetyEventOrchestrator(capture_evidence=True)
+    temporal_registry.reset()
+    detection = make_detection(camera.id, "fire", 0.91, (40, 30, 120, 100), NOW)
+
+    report = orchestrator.evaluate_frame(
+        db, camera, timestamp=NOW, frame=frame(), detections=[detection], tracks=[],
+        model_health=MODEL_HEALTH,
+    )
+    # The event is real and persisted, and the skipped evidence is reported as a
+    # policy decision rather than as a capture failure.
+    assert db.query(Event).count() == 1
+    assert db.query(EventEvidence).count() == 0
+    assert report["events"][0]["evidence_status"] == "EVIDENCE_SKIPPED_BY_RULE_POLICY"
+    assert report["events"][0]["evidence_policy"] == "SKIP"
+    assert db.query(Event).one().provenance_json["rule"]["evidence_policy"] == "SKIP"
+
+
+def test_evidence_policy_capture_is_the_default_for_a_real_frame(topology, tmp_path, monkeypatch):
+    from app.services.evidence_engine import EvidenceEngine
+    import app.services.safety_orchestrator as orchestrator_module
+
+    db, camera, _zone, _officer = topology
+    db.add(DetectorConfig(
+        detector_key="FIRE",
+        camera_id=camera.id,
+        is_enabled=True,
+        parameters_json={"minimum_observations": 1, "minimum_duration_seconds": 0.0},
+    ))
+    db.commit()
+    monkeypatch.setattr(orchestrator_module, "evidence_engine", EvidenceEngine(tmp_path))
+    orchestrator = SafetyEventOrchestrator(capture_evidence=True)
+    temporal_registry.reset()
+    detection = make_detection(camera.id, "fire", 0.91, (40, 30, 120, 100), NOW)
+
+    report = orchestrator.evaluate_frame(
+        db, camera, timestamp=NOW, frame=frame(), detections=[detection], tracks=[],
+        model_health=MODEL_HEALTH,
+    )
+    assert db.query(EventEvidence).count() == 1
+    assert report["events"][0]["evidence_policy"] == "CAPTURE"
+    assert report["events"][0]["evidence_status"] == "CAPTURED"
+
+
+def test_configured_severity_and_zone_scoping_are_applied(topology):
+    db, camera, zone, _officer = topology
+    _tracked_zone_config(db, camera, severity="CRITICAL", zone_scoping="A-ZONE-THIS-CAMERA-IS-NOT-IN")
+    orchestrator = SafetyEventOrchestrator(capture_evidence=False)
+    temporal_registry.reset()
+    detection = make_detection(camera.id, "person", 0.9, (300, 200, 400, 380), NOW)
+    track = FakeTrack("track-zoned", (300, 200, 400, 380), 0.9, timestamp=NOW)
+    orchestrator.persist_detections(db, camera, [detection], [track])
+
+    report = orchestrator.evaluate_frame(
+        db, camera, timestamp=NOW, frame=frame(), detections=[detection], tracks=[track],
+        model_health=MODEL_HEALTH,
+    )
+    entry = report["observations"][0]
+    assert entry["state"] == "ZONE_SCOPING_EXCLUDED"
+    assert entry["event_created"] is False
+    assert db.query(Event).count() == 0
+
+    # With the rule scoped to the camera's own zone, the same observation is in
+    # scope and produces an event at the configured severity.
+    db.query(DetectorConfig).filter(DetectorConfig.detector_key == "RESTRICTED_ZONE").one().parameters_json = {
+        "minimum_observations": 1,
+        "minimum_duration_seconds": 0.0,
+        "severity": "CRITICAL",
+        "zone_scoping": zone.id,
+    }
+    db.commit()
+    temporal_registry.reset()
+    report = orchestrator.evaluate_frame(
+        db, camera, timestamp=NOW + timedelta(seconds=60), frame=frame(), detections=[detection], tracks=[track],
+        model_health=MODEL_HEALTH,
+    )
+    assert report["events"][0]["status"] == "EVENT_CREATED"
+    assert db.query(Event).one().severity == "CRITICAL"

@@ -106,6 +106,7 @@ class Zone(Base):
     operating_thresholds = relationship("OperatingThreshold", back_populates="zone")
     escalation_policies = relationship("EscalationPolicy", back_populates="zone")
     notification_policies = relationship("NotificationPolicy", back_populates="zone")
+    alarms = relationship("Alarm", back_populates="zone")
     event_correlations = relationship("EventCorrelation", back_populates="zone")
 
 
@@ -137,6 +138,7 @@ class Camera(Base):
     operating_thresholds = relationship("OperatingThreshold", back_populates="camera")
     escalation_policies = relationship("EscalationPolicy", back_populates="camera")
     event_correlations = relationship("EventCorrelation", back_populates="camera")
+    alarms = relationship("Alarm", back_populates="camera")
 
 
 class CameraHealth(Base):
@@ -243,6 +245,7 @@ class User(Base):
     corrective_actions = relationship("CorrectiveAction", back_populates="assignee")
     notifications = relationship("Notification", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user")
+    acknowledged_alarms = relationship("Alarm", foreign_keys="[Alarm.acknowledged_by_user_id]", back_populates="acknowledged_by")
 
 
 # ============================================================================
@@ -311,6 +314,7 @@ class Track(Base):
     employee = relationship("User", back_populates="tracks")
     detections = relationship("Detection", back_populates="track")
     events = relationship("Event", back_populates="track")
+    alarms = relationship("Alarm", back_populates="track")
 
 
 class Detection(Base):
@@ -380,6 +384,7 @@ class Event(Base):
     notifications = relationship("Notification", back_populates="event")
     state_transitions = relationship("EventStateTransition", back_populates="event", cascade="all, delete-orphan")
     escalations = relationship("EventEscalation", back_populates="event", cascade="all, delete-orphan")
+    alarms = relationship("Alarm", back_populates="event", cascade="all, delete-orphan")
 
 
 class EventEvidence(Base):
@@ -502,6 +507,7 @@ class Incident(Base):
     reporter = relationship("User", back_populates="reported_incidents")
     corrective_actions = relationship("CorrectiveAction", back_populates="incident")
     state_transitions = relationship("IncidentStateTransition", back_populates="incident", cascade="all, delete-orphan")
+    alarms = relationship("Alarm", back_populates="incident")
 
 
 class NearMiss(Base):
@@ -643,6 +649,88 @@ class AuditLog(Base):
 
     # Relationships
     user = relationship("User", back_populates="audit_logs")
+
+
+# ============================================================================
+# 5b. ALARM SUBSYSTEM
+# ============================================================================
+
+class Alarm(Base):
+    """A software alarm raised from one real, confirmed safety event.
+
+    An alarm row is never created without a persisted event that the temporal
+    verifier already marked CONFIRMED. The row records why it was raised, which
+    policy allowed or suppressed it, and what the physical actuator did. The
+    physical fields stay NULL or NOT_ATTEMPTED until a real transport call runs,
+    so an alarm can never imply that a siren or relay fired when nothing was
+    wired.
+
+    States: ACTIVE, ACKNOWLEDGED, ESCALATED, SUPPRESSED, EXPIRED, CLEARED.
+    """
+    __tablename__ = "alarms"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    event_id = Column(String(36), ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    camera_id = Column(String(36), ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True, index=True)
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="SET NULL"), nullable=True, index=True)
+    track_id = Column(String(36), ForeignKey("tracks.id", ondelete="SET NULL"), nullable=True, index=True)
+    incident_id = Column(String(36), ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True)
+    severity = Column(String(20), default="MEDIUM", nullable=False, index=True)
+    state = Column(String(30), default="ACTIVE", nullable=False, index=True)
+    # The detector and rule that caused the alarm, plus the confidence and model
+    # that produced the underlying event.
+    detector_key = Column(String(50), nullable=True, index=True)
+    confidence = Column(Float, nullable=True)
+    model_name = Column(String(100), nullable=True)
+    model_version = Column(String(50), nullable=True)
+    reason = Column(String(500), nullable=True)
+    provenance_json = Column(JSON, nullable=True)
+
+    # Alarm policy accounting. repeat_count and suppression_count make repeated
+    # alarm suppression auditable rather than invisible.
+    raised_count = Column(Integer, default=1, nullable=False)
+    suppression_count = Column(Integer, default=0, nullable=False)
+    cooldown_until = Column(DateTime(timezone=True), nullable=True, index=True)
+    raised_at = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    cleared_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    # Physical actuation facts. physical_state is PHYSICAL_ALARM_NOT_CONFIGURED,
+    # ACTUATOR_NOT_CONNECTED, ACTIVATION_ATTEMPTED, or ACTIVATED. ACTIVATED is
+    # only ever written from a real successful transport call.
+    physical_state = Column(String(50), default="PHYSICAL_ALARM_NOT_CONFIGURED", nullable=False)
+    physical_result = Column(String(255), nullable=True)
+    physical_activated_at = Column(DateTime(timezone=True), nullable=True)
+    physical_cleared_at = Column(DateTime(timezone=True), nullable=True)
+
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    # Relationships
+    event = relationship("Event", back_populates="alarms")
+    camera = relationship("Camera", back_populates="alarms")
+    zone = relationship("Zone", back_populates="alarms")
+    track = relationship("Track", back_populates="alarms")
+    incident = relationship("Incident", back_populates="alarms")
+    acknowledged_by = relationship("User", foreign_keys=[acknowledged_by_user_id], back_populates="acknowledged_alarms")
+    state_transitions = relationship("AlarmStateTransition", back_populates="alarm", cascade="all, delete-orphan")
+
+
+class AlarmStateTransition(Base):
+    """Auditable record of an allowed alarm state transition."""
+    __tablename__ = "alarm_state_transitions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    alarm_id = Column(String(36), ForeignKey("alarms.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    previous_state = Column(String(30), nullable=True)
+    new_state = Column(String(30), nullable=False)
+    reason = Column(Text, nullable=False)
+    transitioned_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    alarm = relationship("Alarm", back_populates="state_transitions")
+    user = relationship("User")
 
 
 # ============================================================================

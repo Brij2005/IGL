@@ -10,13 +10,13 @@ try:
     from app.database import get_db
     from app.models import Notification, User
     from app.schemas_system import NotificationChannelStatusOut, NotificationOut
-    from app.services.notification_engine import channel_status, due_notifications, enqueue_notification
+    from app.services.notification_engine import channel_status, delivery_status_for, due_notifications, enqueue_notification
 except ImportError:
     from backend.app.access_control import log_audit_event, require_permission, require_role
     from backend.app.database import get_db
     from backend.app.models import Notification, User
     from backend.app.schemas_system import NotificationChannelStatusOut, NotificationOut
-    from backend.app.services.notification_engine import channel_status, due_notifications, enqueue_notification
+    from backend.app.services.notification_engine import channel_status, delivery_status_for, due_notifications, enqueue_notification
 
 
 router = APIRouter()
@@ -35,8 +35,17 @@ class TestDeliveryRequest(BaseModel):
 
 
 class TestDeliveryResult(BaseModel):
+    """The honest outcome of one operator-requested test send.
+
+    ``status`` is the transport result; ``delivery_status`` is the external
+    vocabulary (EMAIL_DELIVERED, EMAIL_DELIVERY_FAILED, ...). No field is ever
+    populated from an assumption: a channel without credentials reports
+    *_NOT_CONFIGURED and never a delivered status.
+    """
+
     channel: str
     status: str
+    delivery_status: str
     provider: str
     recipient: str
     message_id: str | None = None
@@ -119,12 +128,13 @@ def test_email_delivery(
 ):
     """Send a real one-off SMTP test message; never reports simulated success."""
     try:
-        from app.services.notification_delivery import send_email
+        from app.services.notification_delivery import send_email, test_message
     except ImportError:
-        from backend.app.services.notification_delivery import send_email
-    result = send_email([payload.recipient], "IGL Safety Intelligence test", "SMTP test requested by an operator.")
+        from backend.app.services.notification_delivery import send_email, test_message
+    subject, body = test_message("EMAIL")
+    result = send_email([payload.recipient], subject, body)
     log_audit_event(db, actor.id if actor else None, "EMAIL_TEST_ATTEMPTED", "NOTIFICATION_TRANSPORT", details_json={"status": result["status"]}, ip_address=request.client.host if request.client else None)
-    return {"channel": "EMAIL", "recipient": payload.recipient, **result}
+    return {"channel": "EMAIL", "recipient": payload.recipient, "delivery_status": delivery_status_for("EMAIL", result["status"]), **result}
 
 
 @router.post("/test/whatsapp", response_model=TestDeliveryResult)
@@ -136,9 +146,10 @@ def test_whatsapp_delivery(
 ):
     """Send a real one-off WhatsApp Cloud API test message."""
     try:
-        from app.services.notification_delivery import send_whatsapp
+        from app.services.notification_delivery import send_whatsapp, test_message
     except ImportError:
-        from backend.app.services.notification_delivery import send_whatsapp
-    result = send_whatsapp(payload.recipient, "IGL Safety Intelligence test message.")
+        from backend.app.services.notification_delivery import send_whatsapp, test_message
+    _, body = test_message("WHATSAPP")
+    result = send_whatsapp(payload.recipient, body)
     log_audit_event(db, actor.id if actor else None, "WHATSAPP_TEST_ATTEMPTED", "NOTIFICATION_TRANSPORT", details_json={"status": result["status"]}, ip_address=request.client.host if request.client else None)
-    return {"channel": "WHATSAPP", "recipient": payload.recipient, **result}
+    return {"channel": "WHATSAPP", "recipient": payload.recipient, "delivery_status": delivery_status_for("WHATSAPP", result["status"]), **result}
