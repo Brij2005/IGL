@@ -46,7 +46,7 @@ suite never depends on a deployment's data.
 - **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association and persistence, camera-to-pipeline wiring, continuous camera-health worker, audited event transitions, response lifecycles, migration-owned schema, and derived health semantics. Authentication/bootstrap are not implemented.
 - **PARTIALLY IMPLEMENTED:** Supported fire/smoke/restricted-zone event path is code-connected but blocked at runtime by missing weights and IGL configuration; other listed detector categories remain unavailable.
 - **PARTIALLY IMPLEMENTED:** Operator-supplied configuration APIs, event-linked evidence, in-app queue, DB-count analytics, browser dashboard and event-driven local alarm. External sender delivery and authentication are absent.
-- **REAL-INPUT CHECK:** Laptop webcam device 0 was opened through the backend; actual 640x480 frames were displayed from MJPEG in the browser. This is camera acquisition validation only.
+- **WEBCAM CHECK:** A previous local run records backend preview from device 0 at 640x480. In the current execution, device discovery and capture failed for device 0 and all probed indices, so that hardware result is historical and not reproduced here.
 - **NOT_CONFIGURED:** Model weights are absent; model health reports `MODEL_NOT_CONFIGURED`.
 - **NOT_VALIDATED:** No IGL layouts, cameras, SOPs, or labeled IGL data were supplied or assessed.
 - **BLOCKED_BY_REAL_INPUT:** Model inference and detector validation require an authorized compatible model checkpoint. IGL validation additionally requires authorized plant layout/SOP data and labeled IGL footage.

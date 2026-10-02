@@ -3,7 +3,7 @@
 ## Current Result
 
 - Model weights: **UNCONFIGURED**. No weights are present in the workspace.
-- Webcam acquisition: **VALIDATED ONLY AT THE SOURCE/PREVIEW LEVEL**. Device 0 opened through DSHOW, real 640x480 frames were displayed through the backend MJPEG endpoint, and the final UI run measured 8.06 FPS. This is not model inference or detector validation.
+- Webcam acquisition: **NOT REPRODUCED IN THE CURRENT EXECUTION**. The earlier repository record reports device 0 / DSHOW / 640x480 preview / 8.06 FPS, but the current `scripts/test_webcam.py` run could not open or enumerate a device using DSHOW or fallback. Treat the earlier observation as historical; it is not current hardware validation. Camera acquisition alone would not validate model inference or detector performance.
 - Detection and tracking performance: **NOT_VALIDATED**. Real-time detection, FPS, accuracy, precision, recall, F1, and tracking accuracy have not been measured.
 - IGL validation: **NOT_VALIDATED**. No authorized IGL footage or labeled dataset has been evaluated.
 - Model-backed validation runner: **BLOCKED_BY_MODEL**. `scripts/run_inference.py` is implemented and tested against controlled fixtures, but no compatible weights or authorized labeled IGL evaluation data are available.
