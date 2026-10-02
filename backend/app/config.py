@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     # Access control. This build has no authentication at all: no login, no
     # password verification, no token issuance and no token validation. While
     # ALLOW_ANONYMOUS_ACCESS is true every endpoint is reachable without a
-    # credential, which is only defensible when access is controlled at the
-    # network layer or by an authenticating reverse proxy in front of this
-    # service. Setting it to false makes every access-control dependency refuse
+    # credential, which is only suitable for a localhost demo: this API does not
+    # accept or enforce identity headers from a reverse proxy. Setting it to
+    # false makes every access-control dependency refuse
     # the request instead of pretending that an identity exists.
     ALLOW_ANONYMOUS_ACCESS: bool = True
 

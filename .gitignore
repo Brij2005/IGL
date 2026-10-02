@@ -14,5 +14,10 @@ data/*.db-shm
 *.sqlite
 *.sqlite3
 
+# Model artifacts are operator-supplied and are not distributed by default.
+*.pt
+*.onnx
+*.engine
+
 .vscode/
 .kilo/

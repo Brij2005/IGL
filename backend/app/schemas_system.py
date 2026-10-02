@@ -54,9 +54,9 @@ class NotificationOut(BaseModel):
 class NotificationChannelStatusOut(BaseModel):
     """Per-channel delivery state.
 
-    ``configuration_state`` is NOT_CONFIGURED whenever this build has no
-    transport for the channel, so a queue depth can never be mistaken for
-    evidence that an alert was delivered.
+    ``configuration_state`` distinguishes absent settings from a configured
+    channel whose sender is not implemented, so queue depth is never mistaken
+    for evidence that an alert was delivered.
     """
     channel: str
     configuration_state: str
