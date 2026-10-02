@@ -86,6 +86,24 @@ DEFAULT_ROLES = [
             "events:view", "events:acknowledge",
             "zones:view", "evidence:view"
         ]
+    },
+    {
+        "name": "SUPERVISOR",
+        "description": "Shift supervisor monitoring cameras and coordinating event response",
+        "permissions_json": [
+            "cameras:view", "cameras:view_live", "events:view", "events:acknowledge", "events:assign",
+            "incidents:view", "incidents:manage", "near_misses:view",
+            "corrective_actions:view", "corrective_actions:manage",
+            "plants:view", "zones:view", "evidence:view", "analytics:view"
+        ]
+    },
+    {
+        "name": "VIEWER",
+        "description": "Read-only operational visibility without live camera or configuration access",
+        "permissions_json": [
+            "cameras:view", "events:view", "incidents:view", "near_misses:view",
+            "corrective_actions:view", "plants:view", "zones:view", "evidence:view", "analytics:view"
+        ]
     }
 ]
 

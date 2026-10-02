@@ -36,8 +36,16 @@ let webcamCamera = null;
 let webcamSourceStatus = null;
 let webcamSystemHealth = null;
 let webcamPollingTimer = null;
+let webcamPreviewTimer = null;
+let webcamPreviewInFlight = false;
+let webcamPreviewObjectUrl = null;
 let webcamBusy = false;
 let webcamCameraError = null;
+let currentIdentity = null;
+let browserCameraStream = null;
+let browserCameraFrames = 0;
+let browserCameraFrameStartedAt = 0;
+let browserCameraFrameHandle = null;
 
 const appShell = document.querySelector("#app-shell");
 const loginShell = document.querySelector("#login-shell");
@@ -72,6 +80,7 @@ async function request(path, options = {}) {
     } catch { /* Keep the HTTP status only. */ }
     if (response.status === 401 && authToken) {
       authToken = null;
+      currentIdentity = null;
       sessionStorage.removeItem(AUTH_TOKEN_KEY);
       showLogin("Your session expired or was revoked. Sign in again.");
     }
@@ -202,6 +211,7 @@ async function renderCameras() {
     <td>${camera.is_active ? "ACTIVE" : "DEACTIVATED"}</td>
   </tr>`).join("");
   content.innerHTML = `${renderWebcamPanel()}
+    ${renderBrowserWebcamPanel()}
     <div class="filter-bar camera-inventory-head"><p>Configured values and observed telemetry are shown separately.</p><span class="status-pill">${cameras.length} RECORDS</span></div>
     <section class="section"><div class="section-head"><h2>Camera inventory</h2><span>STREAM URL CREDENTIALS REDACTED</span></div>
       ${rows ? `<div class="table-wrap"><table><thead><tr><th>Camera</th><th>Connection</th><th>AI state</th><th>Frame rate</th><th>Observed resolution</th><th>Config</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No cameras configured.</strong>Register an authorized source through the camera API.</div></div>`}
@@ -211,6 +221,8 @@ async function renderCameras() {
   document.querySelector("#webcam-start").addEventListener("click", startLaptopWebcam);
   document.querySelector("#webcam-stop").addEventListener("click", stopLaptopWebcam);
   document.querySelector("#webcam-preview-image").addEventListener("error", handleWebcamPreviewError);
+  document.querySelector("#browser-camera-start").addEventListener("click", startBrowserCamera);
+  document.querySelector("#browser-camera-stop").addEventListener("click", stopBrowserCamera);
   updateWebcamPanel();
   webcamPollingTimer = window.setInterval(() => {
     refreshWebcamStatus().catch((error) => setWebcamError(error.message));
@@ -233,6 +245,59 @@ function stopWebcamPolling() {
     preview.removeAttribute("src");
     preview.hidden = true;
   }
+  stopWebcamPreview();
+}
+
+function stopWebcamPreview() {
+  if (webcamPreviewTimer !== null) {
+    window.clearTimeout(webcamPreviewTimer);
+    webcamPreviewTimer = null;
+  }
+  const image = document.querySelector("#webcam-preview-image");
+  if (image) {
+    image.removeAttribute("src");
+    image.hidden = true;
+  }
+  if (webcamPreviewObjectUrl) URL.revokeObjectURL(webcamPreviewObjectUrl);
+  webcamPreviewObjectUrl = null;
+}
+
+async function refreshWebcamPreview() {
+  if (currentView !== "cameras" || !document.querySelector("#webcam-preview-image") || !canViewBackendPreview() || !webcamIsOnline() || webcamPreviewInFlight) return;
+  webcamPreviewInFlight = true;
+  try {
+    const response = await fetch(`${apiBase}/cameras/${encodeURIComponent(webcamCamera.id)}/snapshot.jpg`, {
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      let detail = `Authenticated camera snapshot failed (${response.status})`;
+      try { detail = (await response.json()).detail || detail; } catch { /* Keep HTTP status. */ }
+      throw new Error(detail);
+    }
+    const nextObjectUrl = URL.createObjectURL(await response.blob());
+    const image = document.querySelector("#webcam-preview-image");
+    const empty = document.querySelector("#webcam-preview-empty");
+    if (!image || !webcamIsOnline()) {
+      URL.revokeObjectURL(nextObjectUrl);
+      return;
+    }
+    if (webcamPreviewObjectUrl) URL.revokeObjectURL(webcamPreviewObjectUrl);
+    webcamPreviewObjectUrl = nextObjectUrl;
+    image.src = nextObjectUrl;
+    image.hidden = false;
+    empty.hidden = true;
+  } catch (error) {
+    handleWebcamPreviewError(error.message);
+  } finally {
+    webcamPreviewInFlight = false;
+    if (currentView === "cameras" && document.querySelector("#webcam-preview-image") && canViewBackendPreview() && webcamIsOnline()) webcamPreviewTimer = window.setTimeout(refreshWebcamPreview, 250);
+  }
+}
+
+function canViewBackendPreview() {
+  const permissions = currentIdentity?.role?.permissions_json;
+  return !currentIdentity || permissions?.includes("*") || permissions?.includes("cameras:view_live");
 }
 
 function discoveredLaptopDevice() {
@@ -311,19 +376,21 @@ function updateWebcamPanel() {
     : starting ? "Capture opened; waiting for the first real frame" : stopped ? "Stopped; source released" : "Not streaming";
   document.querySelector("#webcam-model-state").textContent = `MODEL: ${webcamSourceStatus?.model_state || webcamSystemHealth?.model_state || "NOT_AVAILABLE"}`;
   document.querySelector("#webcam-error").textContent = webcamErrorText();
-  document.querySelector("#webcam-start").disabled = webcamBusy || online || starting || !detected;
-  document.querySelector("#webcam-stop").disabled = webcamBusy || !(online || starting);
-  document.querySelector("#webcam-discover").disabled = webcamBusy;
+  const canManageSource = !currentIdentity || ["ADMIN", "SAFETY_OFFICER"].includes(currentIdentity.role?.name);
+  document.querySelector("#webcam-start").disabled = !canManageSource || webcamBusy || online || starting || !detected;
+  document.querySelector("#webcam-stop").disabled = !canManageSource || webcamBusy || !(online || starting);
+  document.querySelector("#webcam-discover").disabled = !canManageSource || webcamBusy;
 
   const image = document.querySelector("#webcam-preview-image");
   const empty = document.querySelector("#webcam-preview-empty");
-  if (online && image && !image.getAttribute("src")) {
-    image.src = `${apiBase}/cameras/${encodeURIComponent(webcamCamera.id)}/preview.mjpg?started=${Date.now()}`;
-    image.hidden = false;
-    empty.hidden = true;
+  if (online && image) {
+    if (!canViewBackendPreview()) {
+      stopWebcamPreview();
+      empty.hidden = false;
+      empty.textContent = "LIVE_PREVIEW_PERMISSION_REQUIRED";
+    } else if (!webcamPreviewTimer && !webcamPreviewInFlight && !image.getAttribute("src")) refreshWebcamPreview();
   } else if (!online && image) {
-    image.removeAttribute("src");
-    image.hidden = true;
+    stopWebcamPreview();
     empty.hidden = false;
     empty.textContent = starting ? "Waiting for the first real webcam frame…" : "Live preview will appear after the webcam delivers a real frame.";
   }
@@ -334,15 +401,15 @@ function setWebcamError(message) {
   if (error) error.textContent = message;
 }
 
-function handleWebcamPreviewError() {
+function handleWebcamPreviewError(message = "The real-frame preview stream could not be opened.") {
   const image = document.querySelector("#webcam-preview-image");
   const empty = document.querySelector("#webcam-preview-empty");
   if (image) image.hidden = true;
   if (empty) {
     empty.hidden = false;
-    empty.textContent = "The real-frame preview stream could not be opened.";
+    empty.textContent = message;
   }
-  setWebcamError("Preview stream request failed; camera capture status is reported separately.");
+  setWebcamError(`Authenticated snapshot preview unavailable: ${message}`);
 }
 
 async function discoverLaptopWebcam() {
@@ -492,6 +559,7 @@ function renderAlarmState(events, error = null) {
   region.innerHTML = `<div class="alarm-banner alarm-active" role="alert">
     <div class="alarm-summary"><span class="alarm-label">ACTIVE SAFETY ALARM</span><strong>${activeAlarmEvents.length} CONFIRMED EVENT${activeAlarmEvents.length === 1 ? "" : "S"} AWAITING ACKNOWLEDGEMENT</strong></div>
     <div class="alarm-event-list">${activeAlarmEvents.map((event) => `<div class="alarm-event-row"><span><strong>${escapeHtml(event.event_type)}</strong><span>${escapeHtml(event.severity)} · ${escapeHtml(formatDate(event.started_at))}</span></span><button class="alarm-ack-button" data-alarm-ack="${escapeHtml(event.id)}" type="button">Acknowledge</button></div>`).join("")}</div>
+    <p class="browser-camera-note">Browser audio only · no physical relay or siren is configured.</p>
     <button class="alarm-sound-button" id="alarm-sound-toggle" type="button" aria-pressed="${alarmSoundEnabled}">${alarmSoundEnabled ? "Disable browser sound" : "Enable browser sound"}</button>
   </div>`;
   region.querySelectorAll("[data-alarm-ack]").forEach((button) => {
@@ -681,10 +749,10 @@ async function renderConfiguration() {
         <label>Code<input name="code" required maxlength="80"></label><label>Metric<input name="metric" required maxlength="80"></label><label>Value<input name="value" type="number" step="any" required></label><label>Unit<input name="unit" maxlength="30"></label><label>Comparison<select name="comparison"><option>GT</option><option>GTE</option><option>LT</option><option>LTE</option><option>EQ</option></select></label><label>Camera<select name="camera_id">${scopedOptions(cameras, (item) => `${item.name} (${item.code})`)}</select></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Threshold source<select name="threshold_source"><option value="ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION">ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION</option><option value="CONFIGURED">CONFIGURED</option></select></label><label>Source reference<input name="source_reference" maxlength="500"></label><button class="inline-button" type="submit">Save threshold</button>
       </div></form>
       <form class="section config-form" data-endpoint="/configuration/escalation-policies" data-number-fields="escalate_after_seconds,escalation_level"><div class="section-head"><h2>Escalation policy</h2><span>NO DELIVERY GUARANTEE</span></div><div class="section-body">
-        <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Camera<select name="camera_id">${scopedOptions(cameras, (item) => `${item.name} (${item.code})`)}</select></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Delay seconds<input name="escalate_after_seconds" type="number" min="1" value="900" required></label><label>From role<input name="from_role" maxlength="50"></label><label>To role<select name="to_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option></select></label><label>Level<input name="escalation_level" type="number" min="1" max="10" value="1" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><button class="inline-button" type="submit">Save escalation policy</button>
+        <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Camera<select name="camera_id">${scopedOptions(cameras, (item) => `${item.name} (${item.code})`)}</select></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Delay seconds<input name="escalate_after_seconds" type="number" min="1" value="900" required></label><label>From role<input name="from_role" maxlength="50"></label><label>To role<select name="to_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option><option>SUPERVISOR</option><option>VIEWER</option></select></label><label>Level<input name="escalation_level" type="number" min="1" max="10" value="1" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><button class="inline-button" type="submit">Save escalation policy</button>
       </div></form>
       <form class="section config-form" data-endpoint="/configuration/notification-policies" data-number-fields="dedup_window_seconds" data-checkbox-fields="is_enabled"><div class="section-head"><h2>Notification policy</h2><span>DELIVERY STATUS BELOW</span></div><div class="section-body">
-        <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Channel<select name="channel"><option>DASHBOARD</option><option>EMAIL</option><option>WHATSAPP</option><option>WEBHOOK</option><option>SMS</option><option>TEAMS</option><option>BUZZER</option></select></label><label>Recipient role<select name="recipient_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option></select></label><label>Deduplication window seconds<input name="dedup_window_seconds" type="number" min="0" max="86400" value="300" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><label class="checkbox-label"><input name="is_enabled" type="checkbox" checked> Enable policy</label><button class="inline-button" type="submit">Save notification policy</button>
+        <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Channel<select name="channel"><option>DASHBOARD</option><option>EMAIL</option><option>WHATSAPP</option><option>WEBHOOK</option><option>SMS</option><option>TEAMS</option><option>BUZZER</option></select></label><label>Recipient role<select name="recipient_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option><option>SUPERVISOR</option><option>VIEWER</option></select></label><label>Deduplication window seconds<input name="dedup_window_seconds" type="number" min="0" max="86400" value="300" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><label class="checkbox-label"><input name="is_enabled" type="checkbox" checked> Enable policy</label><button class="inline-button" type="submit">Save notification policy</button>
       </div></form>
     </div></details>
     <section class="section notification-transport"><div class="section-head"><h2>Delivery transports</h2><span>TEST SENDS CONTACT REAL RECIPIENTS</span></div><div class="section-body">${stateRows(notificationChannels.filter((item) => ["EMAIL", "WHATSAPP"].includes(item.channel)).map((item) => [item.channel, `${item.configuration_state} · QUEUED ${item.queued} · SENT ${item.sent} · FAILED ${item.failed}`]))}<p class="config-note">Configure transport credentials in the backend environment, restart the API, then send only to an operator-approved recipient. A provider acceptance is not proof that a person read the message.</p><div class="notification-test-grid"><form id="email-test-form"><label>Test email recipient<input name="recipient" type="email" required autocomplete="email"></label><button class="inline-button" type="submit">Send test email</button></form><form id="whatsapp-test-form"><label>WhatsApp recipient in E.164 format<input name="recipient" type="tel" required placeholder="+15551234567" autocomplete="tel"></label><button class="inline-button" type="submit">Send test WhatsApp</button></form></div></div></section>
@@ -743,6 +811,107 @@ async function renderConfiguration() {
   }));
 }
 
+function renderBrowserWebcamPanel() {
+  return `<section class="webcam-panel browser-webcam-panel" aria-labelledby="browser-webcam-title">
+    <div class="webcam-heading"><div><p class="eyebrow">BROWSER PERMISSION · LOCAL PREVIEW</p><h2 id="browser-webcam-title">Browser Webcam</h2></div><span id="browser-camera-state" class="webcam-badge is-neutral">NOT STARTED</span></div>
+    <p class="browser-camera-note">This preview uses this browserâ€™s camera permission and stays in the browser. It is not sent to backend AI inference and does not create detections or events. Use localhost or HTTPS.</p>
+    <div class="webcam-preview"><video id="browser-camera-video" autoplay muted playsinline hidden></video><div id="browser-camera-empty" class="webcam-preview-empty">Start to request explicit browser camera permission.</div><span class="preview-source-label">BROWSER ONLY · NOT AI CONNECTED</span></div>
+    <div class="webcam-controls"><div class="webcam-actions"><select id="browser-camera-devices" class="select-input" aria-label="Browser camera device"><option value="">Default camera</option></select><button class="webcam-button webcam-button-primary" id="browser-camera-start" type="button">Allow &amp; Start Preview</button><button class="webcam-button" id="browser-camera-stop" type="button" disabled>Stop Preview</button></div></div>
+    <div class="webcam-telemetry"><article class="webcam-stat"><span>Resolution</span><strong id="browser-camera-resolution">NOT_OBSERVED</strong></article><article class="webcam-stat"><span>Measured FPS</span><strong id="browser-camera-fps">NOT_MEASURED</strong></article><article class="webcam-stat"><span>Frames</span><strong id="browser-camera-frames">0</strong></article><article class="webcam-stat"><span>AI connection</span><strong>NOT_CONNECTED</strong></article></div>
+    <div class="webcam-error-row"><strong>Permission / device status</strong><span id="browser-camera-error" role="status">Camera access has not been requested.</span></div>
+  </section>`;
+}
+
+async function startBrowserCamera() {
+  const state = document.querySelector("#browser-camera-state");
+  const message = document.querySelector("#browser-camera-error");
+  const select = document.querySelector("#browser-camera-devices");
+  if (!navigator.mediaDevices?.getUserMedia) {
+    message.textContent = "Browser camera API unavailable. Open on localhost or HTTPS in a supported browser.";
+    state.textContent = "UNAVAILABLE";
+    return;
+  }
+  stopBrowserCamera();
+  state.textContent = "REQUESTING_PERMISSION";
+  message.textContent = "Waiting for explicit browser permission…";
+  try {
+    const video = select.value ? { deviceId: { exact: select.value }, width: { ideal: 1280 }, height: { ideal: 720 } } : { width: { ideal: 1280 }, height: { ideal: 720 } };
+    browserCameraStream = await navigator.mediaDevices.getUserMedia({ audio: false, video });
+    const element = document.querySelector("#browser-camera-video");
+    element.srcObject = browserCameraStream;
+    element.hidden = false;
+    await element.play();
+    const track = browserCameraStream.getVideoTracks()[0];
+    const settings = track.getSettings();
+    document.querySelector("#browser-camera-resolution").textContent = settings.width && settings.height ? `${settings.width} × ${settings.height}` : "NOT_REPORTED";
+    state.textContent = "LIVE_BROWSER_PREVIEW";
+    message.textContent = `Browser permission granted; ${track.label || "camera"}. Preview remains local to this browser.`;
+    document.querySelector("#browser-camera-start").disabled = true;
+    document.querySelector("#browser-camera-stop").disabled = false;
+    if (navigator.mediaDevices.enumerateDevices) {
+      const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput");
+      select.replaceChildren(...devices.map((device, index) => {
+        const option = document.createElement("option");
+        option.value = device.deviceId;
+        option.textContent = device.label || `Camera ${index + 1}`;
+        return option;
+      }));
+      select.value = settings.deviceId || track.getSettings().deviceId || "";
+    }
+    browserCameraFrames = 0;
+    browserCameraFrameStartedAt = performance.now();
+    document.querySelector("#browser-camera-frames").textContent = "0";
+    measureBrowserCameraFrames(element);
+  } catch (error) {
+    stopBrowserCamera();
+    state.textContent = "CAMERA_ERROR";
+    message.textContent = `${error.name || "CameraError"}: ${error.message || "Browser camera permission or device unavailable."}`;
+  }
+}
+
+function measureBrowserCameraFrames(video) {
+  if (!browserCameraStream) return;
+  const onFrame = (_now, metadata) => {
+    if (!browserCameraStream) return;
+    browserCameraFrames += 1;
+    document.querySelector("#browser-camera-frames").textContent = String(browserCameraFrames);
+    const elapsed = (performance.now() - browserCameraFrameStartedAt) / 1000;
+    if (elapsed >= 2) document.querySelector("#browser-camera-fps").textContent = `${(browserCameraFrames / elapsed).toFixed(2)} fps`;
+    if (metadata?.width && metadata?.height) document.querySelector("#browser-camera-resolution").textContent = `${metadata.width} × ${metadata.height}`;
+    browserCameraFrameHandle = video.requestVideoFrameCallback(onFrame);
+  };
+  if (video.requestVideoFrameCallback) browserCameraFrameHandle = video.requestVideoFrameCallback(onFrame);
+  else browserCameraFrameHandle = window.setInterval(() => {
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      browserCameraFrames += 1;
+      document.querySelector("#browser-camera-frames").textContent = String(browserCameraFrames);
+      const elapsed = (performance.now() - browserCameraFrameStartedAt) / 1000;
+      if (elapsed >= 2) document.querySelector("#browser-camera-fps").textContent = `${(browserCameraFrames / elapsed).toFixed(2)} fps (sampled)`;
+    }
+  }, 100);
+}
+
+function stopBrowserCamera() {
+  if (browserCameraFrameHandle !== null) {
+    const video = document.querySelector("#browser-camera-video");
+    if (video?.cancelVideoFrameCallback) video.cancelVideoFrameCallback(browserCameraFrameHandle);
+    else window.clearInterval(browserCameraFrameHandle);
+    browserCameraFrameHandle = null;
+  }
+  browserCameraStream?.getTracks().forEach((track) => track.stop());
+  browserCameraStream = null;
+  const video = document.querySelector("#browser-camera-video");
+  if (video) { video.srcObject = null; video.hidden = true; }
+  const state = document.querySelector("#browser-camera-state");
+  if (state) state.textContent = "STOPPED · DEVICE RELEASED";
+  const start = document.querySelector("#browser-camera-start");
+  if (start) start.disabled = false;
+  const stop = document.querySelector("#browser-camera-stop");
+  if (stop) stop.disabled = true;
+  const empty = document.querySelector("#browser-camera-empty");
+  if (empty) { empty.hidden = false; empty.textContent = "Browser preview stopped; media tracks released."; }
+}
+
 async function renderSystem() {
   const health = await request("/system/health");
   const model = health.model || {};
@@ -752,7 +921,7 @@ async function renderSystem() {
       ["Cameras", health.camera_state], ["Camera monitor", health.camera_health_worker],
       ["Inference pipeline", health.inference_pipeline], ["Model", health.model_state], ["Evidence", health.evidence_subsystem],
       ["Notifications", health.notification_subsystem], ["Frontend connectivity", health.frontend_connectivity],
-      ["Measured performance", health.measured_performance], ["IGL validated", health.igl_validated],
+      ["Measured performance", health.measured_performance], ["Physical alarm output", "PHYSICAL_ALARM_NOT_CONFIGURED"], ["IGL validated", health.igl_validated],
     ])}</div></section><section class="section"><div class="section-head"><h2>Model configuration</h2></div><div class="section-body">${stateRows([
       ["Name", model.model_name], ["Version", model.model_version], ["Classes", model.classes?.length ?? "NOT_AVAILABLE"],
       ["Confidence threshold", model.confidence_threshold], ["Inference count", model.inference_count], ["Average latency", model.average_inference_latency_ms ?? "NOT_MEASURED"],
@@ -767,6 +936,7 @@ async function renderAudit() {
 const renderers = { overview: renderOverview, cameras: renderCameras, events: renderEvents, evidence: renderEvidence, configuration: renderConfiguration, analytics: renderAnalytics, system: renderSystem, audit: renderAudit, unavailable: async () => { content.innerHTML = unavailableMarkup(); } };
 
 async function navigate(view) {
+  if (view !== "cameras") stopBrowserCamera();
   if (view !== "cameras") stopWebcamPolling();
   currentView = view;
   const [kicker, title] = labels[view] || labels.overview;
@@ -792,7 +962,18 @@ function setApiIndicator(status, text) {
   document.querySelector("#api-state-text").textContent = text;
 }
 
+function applyNavigationPermissions() {
+  document.querySelectorAll("#navigation [data-view]").forEach((button) => {
+    const permissions = currentIdentity?.role?.permissions_json;
+    const allowedByPermission = !currentIdentity || permissions?.includes("*") || permissions?.includes(button.dataset.permission);
+    const roles = button.dataset.roles?.split(",") || [];
+    const allowedByRole = !roles.length || roles.includes(currentIdentity?.role?.name);
+    button.hidden = !(allowedByPermission && allowedByRole);
+  });
+}
+
 function showApplication() {
+  applyNavigationPermissions();
   loginShell.hidden = true;
   appShell.hidden = false;
   document.querySelector("#logout-button").hidden = !authToken;
@@ -801,6 +982,7 @@ function showApplication() {
 }
 
 function showLogin(message = "") {
+  stopBrowserCamera();
   stopWebcamPolling();
   if (alarmPollingTimer) clearInterval(alarmPollingTimer);
   alarmPollingTimer = null;
@@ -808,6 +990,8 @@ function showLogin(message = "") {
   loginShell.hidden = false;
   document.querySelector("#login-message").textContent = message;
 }
+
+window.addEventListener("pagehide", stopBrowserCamera);
 
 async function initializeApplication() {
   try {
@@ -819,7 +1003,7 @@ async function initializeApplication() {
       return;
     }
     if (authToken) {
-      await request("/auth/me");
+      currentIdentity = await request("/auth/me");
       showApplication();
       return;
     }
@@ -833,6 +1017,7 @@ document.querySelector("#api-base").value = apiBase;
 document.querySelector("#login-api-base").value = apiBase;
 document.querySelector("#login-api-base").addEventListener("change", (event) => {
   authToken = null;
+  currentIdentity = null;
   sessionStorage.removeItem(AUTH_TOKEN_KEY);
   apiBase = event.target.value.trim().replace(/\/$/, "");
   sessionStorage.setItem(API_STORAGE_KEY, apiBase);
@@ -841,6 +1026,7 @@ document.querySelector("#login-api-base").addEventListener("change", (event) => 
 });
 document.querySelector("#api-base").addEventListener("change", (event) => {
   authToken = null;
+  currentIdentity = null;
   sessionStorage.removeItem(AUTH_TOKEN_KEY);
   apiBase = event.target.value.trim().replace(/\/$/, "");
   sessionStorage.setItem(API_STORAGE_KEY, apiBase);
@@ -855,6 +1041,7 @@ document.querySelector("#navigation").addEventListener("click", (event) => {
 document.querySelector("#refresh-button").addEventListener("click", () => navigate(currentView));
 document.querySelector("#logout-button").addEventListener("click", () => {
   authToken = null;
+  currentIdentity = null;
   sessionStorage.removeItem(AUTH_TOKEN_KEY);
   showLogin("You have signed out.");
 });
@@ -872,6 +1059,7 @@ document.querySelector("#login-form").addEventListener("submit", async (event) =
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || `Sign in failed (${response.status})`);
     authToken = payload.access_token;
+    currentIdentity = payload.user;
     sessionStorage.setItem(AUTH_TOKEN_KEY, authToken);
     form.reset();
     showApplication();

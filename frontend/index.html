@@ -30,14 +30,14 @@
       </a>
       <p class="nav-label">MONITOR</p>
       <nav id="navigation" aria-label="Primary navigation">
-        <button class="nav-item active" data-view="overview"><span class="nav-symbol">[]</span>Overview</button>
-        <button class="nav-item" data-view="cameras"><span class="nav-symbol">O</span>Cameras</button>
-        <button class="nav-item" data-view="events"><span class="nav-symbol">~</span>Events</button>
-        <button class="nav-item" data-view="evidence"><span class="nav-symbol">#</span>Evidence</button>
-        <button class="nav-item" data-view="configuration"><span class="nav-symbol">C</span>Configuration</button>
-        <button class="nav-item" data-view="analytics"><span class="nav-symbol">%</span>Analytics</button>
-        <button class="nav-item" data-view="system"><span class="nav-symbol">+</span>System health</button>
-        <button class="nav-item" data-view="audit"><span class="nav-symbol">=</span>Audit log</button>
+        <button class="nav-item active" data-view="overview" data-permission="analytics:view"><span class="nav-symbol">[]</span>Overview</button>
+        <button class="nav-item" data-view="cameras" data-permission="cameras:view"><span class="nav-symbol">O</span>Cameras</button>
+        <button class="nav-item" data-view="events" data-permission="events:view"><span class="nav-symbol">~</span>Events</button>
+        <button class="nav-item" data-view="evidence" data-permission="evidence:view"><span class="nav-symbol">#</span>Evidence</button>
+        <button class="nav-item" data-view="configuration" data-roles="ADMIN,SAFETY_OFFICER,PLANT_MANAGER"><span class="nav-symbol">C</span>Configuration</button>
+        <button class="nav-item" data-view="analytics" data-permission="analytics:view"><span class="nav-symbol">%</span>Analytics</button>
+        <button class="nav-item" data-view="system" data-permission="cameras:view"><span class="nav-symbol">+</span>System health</button>
+        <button class="nav-item" data-view="audit" data-permission="audit_logs:view"><span class="nav-symbol">=</span>Audit log</button>
       </nav>
       <div class="sidebar-bottom">
         <div class="igltarget"><span class="status-dot dot-amber"></span><span>IGL VALIDATION<br><strong>NOT VALIDATED</strong></span></div>

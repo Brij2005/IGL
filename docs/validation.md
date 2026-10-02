@@ -2,6 +2,10 @@
 
 ## Authorized Inputs
 
+For a machine-level preflight on Windows, run `./scripts/validate_system.ps1`. It checks installed runtime packages, searches the repository for model files, attempts a real OpenCV webcam capture, and runs tests using a temporary directory in the repository. It never sends provider test messages or claims browser permission, model inference, or plant validation. The report from the webcam probe is the evidence for device availability on that machine.
+
+The dashboard also has a separate browser webcam preview. It requests permission only after the user presses **Allow & Start Preview**, enumerates video devices after permission, displays measured browser video frames/FPS, and releases the media tracks when stopped or leaving Cameras. These frames remain in the browser and are not passed to backend inference. Browser camera access requires localhost or HTTPS.
+
 Install the pinned requirements and copy `.env.example` to `.env`. Keep `.env` local; it is git-ignored. Configure exactly one input:
 
 - `VIDEO_SOURCE`: path to an authorized local `.mp4`, `.avi`, `.mov`, or `.mkv` file.
@@ -56,4 +60,4 @@ The report always records `igl_validated: false`.
 - **Real-time performance:** sustained representative source and deployment hardware, source-vs-processing rate comparison, latency distribution, backlog/drop measurements, and documented operating duration. Do not call it real-time unless processing keeps up under the intended conditions.
 - **IGL validation:** explicit authorization, representative IGL camera footage, documented plant/camera conditions, approved SOP/rules where applicable, labeled IGL validation data, and a reviewed independent evaluation. No such material is currently present in this workspace.
 
-No authorized IGL camera footage, plant layout, PPE SOP dataset, model checkpoint, or labeled IGL validation dataset is currently present. A prior local run records webcam preview on device 0; the current execution's device probe failed for all probed indices and its explicit capture attempt failed on device 0. Webcam availability is therefore not reproduced here. The runner requires model weights and is not a webcam test. Model-backed validation remains `NOT_VALIDATED` until an authorized compatible checkpoint and source are supplied.
+No authorized IGL camera footage, plant layout, PPE SOP dataset, model checkpoint, or labeled IGL validation dataset is currently present. In the current Windows validation, PnP listed a UVC webcam in `OK` state. A sandboxed standalone OpenCV probe failed to open it, while the isolated API process started outside that command sandbox discovered and opened device 0 through DirectShow, observed real frames at 640×480, measured approximately 8 FPS, returned a JPEG snapshot, and stopped/reopened successfully. This process-specific discrepancy must be checked by running the supplied probe in the operator's normal Windows terminal. The runner requires model weights and is not a webcam test. Model-backed validation remains `NOT_VALIDATED` until an authorized compatible checkpoint and source are supplied.

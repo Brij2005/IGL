@@ -454,9 +454,38 @@ def test_baseline_security_headers_and_auth_cache_policy(secured_client):
     assert response.headers["Permissions-Policy"] == "camera=(self), microphone=(), geolocation=()"
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
     assert "Strict-Transport-Security" not in response.headers
-
     login = client.post("/api/v1/auth/login", json={})
     assert login.headers["Cache-Control"] == "no-store"
+
+
+def test_reference_viewer_and_supervisor_roles_are_least_privilege():
+    from backend.app.main import DEFAULT_ROLES
+
+    roles = {item["name"]: set(item["permissions_json"]) for item in DEFAULT_ROLES}
+    assert "VIEWER" in roles
+    assert "SUPERVISOR" in roles
+    assert "*" not in roles["VIEWER"]
+    assert "cameras:view_live" not in roles["VIEWER"]
+    assert "events:view" in roles["VIEWER"]
+    assert "events:acknowledge" in roles["SUPERVISOR"]
+    assert "audit_logs:view" in roles["PLANT_MANAGER"]
+
+
+def test_viewer_and_plant_manager_audit_permissions_are_enforced(secured_client):
+    client, session = secured_client
+    viewer_role = session.query(Role).filter(Role.name == "VIEWER").one()
+    manager_role = session.query(Role).filter(Role.name == "PLANT_MANAGER").one()
+    viewer = User(username="audit_viewer", email="audit_viewer@example.test", full_name="Audit Viewer", role_id=viewer_role.id)
+    manager = User(username="audit_manager", email="audit_manager@example.test", full_name="Audit Manager", role_id=manager_role.id)
+    session.add_all([viewer, manager])
+    session.commit()
+
+    app.dependency_overrides[resolve_actor] = lambda: viewer
+    assert client.get("/api/v1/events?limit=1").status_code == 200
+    assert client.get("/api/v1/identity/audit-logs?limit=1").status_code == 403
+
+    app.dependency_overrides[resolve_actor] = lambda: manager
+    assert client.get("/api/v1/identity/audit-logs?limit=1").status_code == 200
 
 
 # ---------------------------------------------------------------------------

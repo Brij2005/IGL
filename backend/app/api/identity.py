@@ -191,7 +191,7 @@ def get_audit_logs(
     limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    actor: Optional[User] = Depends(require_permission("AUDIT_LOGS_VIEW")),
+    actor: Optional[User] = Depends(require_permission("audit_logs:view")),
 ):
     """Audit trail. Entries written without authentication carry a NULL actor."""
     return db.query(AuditLog).order_by(AuditLog.timestamp.desc()).offset(offset).limit(limit).all()

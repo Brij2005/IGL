@@ -56,6 +56,8 @@ For first startup, set `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_EMAIL`, `INITIAL
 
 JWT authentication and role/permission checks are implemented. Production/staging reject SQLite URLs and wildcard CORS, but this repository does not bundle a production database driver/topology, secret manager, TLS/reverse proxy, distributed rate limiter, recovery/MFA, or independent security review. Use an installed SQLAlchemy driver, exact frontend origins, and reviewed TLS/network controls.
 
+Reference roles are seeded idempotently at startup: `VIEWER` has read-only operational permissions and no live-camera permission; `SUPERVISOR` can view cameras, acknowledge/assign events, and review/manage response workflows. Neither role can administer accounts or edit plant configuration. Existing role rows are preserved and are not silently rewritten by reseeding.
+
 Run the static dashboard from a second project-root terminal with `python -m http.server 8001 --directory frontend`; open `http://127.0.0.1:8001`.
 
 Camera API responses redact URL user information and query parameters. Credential- or query-bearing camera URLs require `CAMERA_URL_ENCRYPTION_KEY`; losing that key makes stored values unreadable. Do not commit `.env`, credentials, or camera URLs containing secrets.

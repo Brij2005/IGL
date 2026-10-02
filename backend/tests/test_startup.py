@@ -54,7 +54,7 @@ def test_startup_seeds_only_fixed_platform_roles():
     session = SessionLocal()
     try:
         assert {role.name for role in session.query(Role).all()} == {
-            "ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER", "OPERATOR"
+            "ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER", "OPERATOR", "SUPERVISOR", "VIEWER"
         }
     finally:
         session.close()
@@ -107,7 +107,7 @@ def test_reference_role_seeding_preserves_existing_configuration():
         assert role.description == "Operator-maintained description"
         assert role.permissions_json == ["operator:maintained"]
         assert {item.name for item in session.query(Role).all()} == {
-            "ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER", "OPERATOR"
+            "ADMIN", "SAFETY_OFFICER", "PLANT_MANAGER", "OPERATOR", "SUPERVISOR", "VIEWER"
         }
     finally:
         session.close()
