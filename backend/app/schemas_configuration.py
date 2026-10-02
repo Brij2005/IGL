@@ -235,7 +235,7 @@ class NotificationPolicyCreate(BaseModel):
     event_type: str | None = Field(None, max_length=50)
     severity: str | None = Field(None, max_length=20)
     zone_id: str | None = None
-    channel: str = Field(..., min_length=2, max_length=50)
+    channel: Literal["DASHBOARD", "EMAIL", "WHATSAPP", "WEBHOOK", "SMS", "TEAMS", "BUZZER"]
     recipient_role: str = Field(..., min_length=2, max_length=50)
     dedup_window_seconds: int = Field(300, ge=0, le=86400)
     is_enabled: bool = True

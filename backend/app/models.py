@@ -198,16 +198,16 @@ class Role(Base):
 class User(Base):
     """Operator identity record.
 
-    This build has no authentication, so a user is not a login account: nothing
-    here can sign in, and no password material is stored. The table is retained
-    because it still has functional purposes that are unrelated to login:
+    A user is an operator account when ``hashed_password`` is set. Development
+    directory records may remain passwordless while anonymous access is enabled.
+    The row also serves operational functions:
 
     * it names who an event was assigned to and who reported an incident,
     * it identifies the actor on audit and state-transition rows,
-    * it carries the role used to resolve notification recipients.
+    * it carries the role used to resolve authorization and notification audiences.
 
-    ``hashed_password`` remains only as a nullable legacy column and is always
-    NULL; authentication code that used it has been removed.
+    ``hashed_password`` is nullable so older passwordless directory records do
+    not accidentally become login accounts.
     """
     __tablename__ = "users"
 
@@ -215,14 +215,14 @@ class User(Base):
     role_id = Column(String(36), ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
     username = Column(String(100), unique=True, nullable=False, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    # Legacy column retained so no historical migration has to be rewritten. It
-    # stores no credential: authentication was removed from this build.
+    # Bcrypt password hash; never included in API response schemas.
     hashed_password = Column(String(255), nullable=True)
+    password_changed_at = Column(DateTime(timezone=True), nullable=True)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
     full_name = Column(String(150), nullable=False)
     employee_code = Column(String(50), nullable=True, index=True)  # Optional enterprise ID
     is_active = Column(Boolean, default=True, nullable=False)
-    # Deactivation is an operational state, not an authentication one: a
-    # deactivated identity is not assignable work.
+    # Deactivated identities cannot sign in or receive assigned work.
     deactivated_at = Column(DateTime(timezone=True), nullable=True)
     deactivated_by_user_id = Column(
         String(36),
@@ -593,8 +593,8 @@ class Notification(Base):
 
     Status values: QUEUED, SENDING, SENT, RETRYING, FAILED, NOT_CONFIGURED,
     NOT_IMPLEMENTED.
-    External channels stay NOT_CONFIGURED until a real sender is configured;
-    nothing here may report SENT without a successful delivery attempt.
+    A channel may only report SENT after the configured provider accepts it;
+    this is not proof that a recipient read or received it.
     """
     __tablename__ = "notifications"
 
@@ -619,6 +619,7 @@ class Notification(Base):
     # Deduplication key so one event does not produce an unbounded alert storm.
     dedup_key = Column(String(255), nullable=True, index=True)
     provider = Column(String(50), nullable=True)
+    provider_message_id = Column(String(255), nullable=True)
     payload_summary = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 

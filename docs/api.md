@@ -1,19 +1,16 @@
 # API Surface
 
-All application routes are under `/api/v1`. Authentication is not implemented;
-the development default allows anonymous access. Declared permission/role
-dependencies do not authorize a real identity in this build. Every response
-carries a sanitized `X-Request-ID` header.
+All application routes are under `/api/v1`. `POST /auth/login` issues short-lived signed bearer tokens; `GET /auth/me` resolves the authenticated account and `POST /auth/password` changes its password and invalidates prior tokens. `ALLOW_ANONYMOUS_ACCESS=true` is a development-only mode; production/staging require JWT auth. Every response carries a sanitized `X-Request-ID` header.
 
 ## Implemented Routes
 
-- `GET/POST /identity/users`, identity role/state updates, and `GET /identity/audit-logs`. These are operator directory records, not authenticated accounts.
+- `GET/POST /identity/users`, identity role/state updates, and `GET /identity/audit-logs`. New users can receive an account password; password hashes are never returned.
 - `GET/POST /cameras`, `GET/PUT/DELETE /cameras/{camera_id}`, and camera status/health operations.
 - `GET /cameras/webcam/devices`, `POST /cameras/webcam/register`, and camera source start/stop routes control the real webcam through the shared backend capture pipeline.
 - `GET /cameras/{camera_id}/preview.mjpg` streams buffered real captures; `GET /cameras/{camera_id}/snapshot.jpg` returns only an observed real frame.
 - `GET /events` reads persisted events; `POST /events/{event_id}/transitions` applies only allowed workflow transitions and records actor/reason history.
 - `GET /events/{event_id}/evidence` lists evidence linked to a persisted event; `GET /events/{event_id}/evidence/{evidence_id}/content` serves an existing in-root file only.
-- `GET /notifications` lists the queue; `POST /notifications/events/{event_id}` creates a queue record. No external delivery worker exists: absent transports report `NOT_CONFIGURED`; configured but unsupported transports report `NOT_IMPLEMENTED`, never `SENT`.
+- `GET /notifications` lists the queue; `POST /notifications/events/{event_id}` creates a queue record. `POST /notifications/test/email` and `/notifications/test/whatsapp` send one real test message to the supplied recipient. A background worker delivers configured EMAIL and WHATSAPP event notifications with bounded retries; other external channels remain `NOT_IMPLEMENTED`. Provider acceptance is recorded as `SENT`, not as proof of inbox/recipient receipt.
 - `GET/POST /configuration/plants`, `/configuration/areas`, `/configuration/zones`, and `/configuration/ppe-rules` provide operator-supplied configuration. Detector/safety rules, thresholds, escalation policies, and notification policies are also under `/configuration/*`. Writes are audited with a NULL actor when anonymous. Validation claims cannot be submitted through safety-rule/threshold creation.
 - `GET /analytics/summary` returns counts from database records and `NOT_MEASURED` accuracy state.
 - `GET /system/health`, `GET /system/ai-health`, and `GET /system/pipelines` expose actual subsystem, model, and pipeline state.
@@ -24,11 +21,7 @@ carries a sanitized `X-Request-ID` header.
 - `GET/POST /corrective-actions` and `POST /corrective-actions/{action_id}/transitions` manage corrective actions; `GET /corrective-actions/{action_id}/transitions` returns its history. A corrective action must name exactly one existing parent (`event_id`, `incident_id`, or `near_miss_id`).
 - `GET /lifecycle-states` publishes the declared state machine for every response entity, so a client never has to infer allowed states.
 
-Response writes declare role/permission requirements, but no user is
-authenticated in this build. With anonymous access enabled those requirements
-are not identity authorization. Event acknowledgement persists a NULL actor;
-state transitions are validated and recorded with previous/new states and a
-reason. Illegal transitions return `409`.
+Response writes enforce role/permission requirements for authenticated users. In explicitly enabled anonymous development mode writes have a NULL actor. Event acknowledgement persists the verified actor when available; state transitions are validated and recorded with previous/new states and a reason. Illegal transitions return `409`.
 
 Incidents, near-misses, and corrective actions refer to an existing event. The
 inference pipeline can create supported detector events only when real model
@@ -51,8 +44,7 @@ validation. It reports `APPLICATION_UP` separately from `DATABASE_OK` /
 
 ## Not Implemented
 
-There is no WebSocket, authentication API, external notification sender, or
-complete user-administration UI. PPE absence, proximity, fall, leakage, and
+There is no WebSocket or complete user-administration UI. PPE absence, proximity, fall, leakage, and
 unsafe-behavior detectors are not implemented. Fire/smoke presence and
 restricted-zone evaluation are conditionally implemented, but cannot run until
 a compatible model and authorized configuration are supplied. Camera failures

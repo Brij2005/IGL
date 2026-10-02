@@ -6,8 +6,8 @@ Delivery rules this module keeps:
 * A channel with no configured sender stays ``NOT_CONFIGURED``. Nothing is
   reported as delivered by an integration that was never configured or never
   reached.
-* Notifications are addressed to an identity, a role or a label. This build has
-  no authentication, so there is no signed-in recipient to fall back on.
+* Notifications are addressed to an identity, a role or a label. Local
+  anonymous mode may create unattributed notification records.
 * Retries are visible: ``retry_count``, ``last_attempt_at`` and
   ``next_attempt_at`` record the schedule, and a failure records why.
 * Repeated alerts for one event inside a dedup window are suppressed instead of
@@ -30,9 +30,9 @@ except ImportError:
 
 # Channels this build can actually deliver. Anything else stays
 # NOT_CONFIGURED instead of pretending a sender exists.
-SUPPORTED_CHANNELS = {"DASHBOARD", "EMAIL", "WEBHOOK", "SMS", "TEAMS", "BUZZER"}
+SUPPORTED_CHANNELS = {"DASHBOARD", "EMAIL", "WHATSAPP", "WEBHOOK", "SMS", "TEAMS", "BUZZER"}
 # Channels that need a real, operator-configured transport.
-EXTERNAL_CHANNELS = {"EMAIL", "WEBHOOK", "SMS", "TEAMS", "BUZZER"}
+EXTERNAL_CHANNELS = {"EMAIL", "WHATSAPP", "WEBHOOK", "SMS", "TEAMS", "BUZZER"}
 
 TERMINAL_STATES = {"SENT", "FAILED", "NOT_CONFIGURED", "NOT_IMPLEMENTED"}
 
@@ -52,7 +52,17 @@ def _as_utc(value: datetime | None) -> datetime | None:
 def _external_transport_configured(channel: str) -> bool:
     """Whether an operator has supplied a transport for an external channel."""
     if channel == "EMAIL":
-        return bool(settings.SMTP_HOST) and bool(settings.NOTIFICATION_FROM_ADDRESS)
+        password = settings.SMTP_PASSWORD.get_secret_value().strip() if settings.SMTP_PASSWORD else ""
+        return (
+            bool(settings.SMTP_HOST)
+            and bool(settings.NOTIFICATION_FROM_ADDRESS)
+            and (bool(settings.SMTP_USERNAME) == bool(password))
+        )
+    if channel == "WHATSAPP":
+        return bool(settings.WHATSAPP_ACCESS_TOKEN and settings.WHATSAPP_ACCESS_TOKEN.get_secret_value().strip()) and bool(
+            settings.WHATSAPP_PHONE_NUMBER_ID and settings.WHATSAPP_API_VERSION
+            and settings.WHATSAPP_RECIPIENTS
+        )
     if channel == "WEBHOOK":
         # SecretStr is always truthy as an object, so the secret must be unwrapped
         # before deciding whether a URL was actually supplied.
@@ -122,8 +132,12 @@ def enqueue_notification(
 
     if channel in EXTERNAL_CHANNELS:
         transport_configured = _external_transport_configured(channel)
-        status = "NOT_IMPLEMENTED" if transport_configured else "NOT_CONFIGURED"
+        implemented = channel in {"EMAIL", "WHATSAPP"}
+        status = "QUEUED" if transport_configured and implemented else (
+            "NOT_IMPLEMENTED" if transport_configured else "NOT_CONFIGURED"
+        )
         error_message = (
+            None if transport_configured and implemented else
             f"{channel} transport settings are present, but a delivery sender is not implemented"
             if transport_configured
             else f"No {channel} transport is configured for this deployment"
@@ -144,7 +158,7 @@ def enqueue_notification(
         provider=None,
         payload_summary=payload_summary,
         max_attempts=settings.NOTIFICATION_MAX_ATTEMPTS,
-        next_attempt_at=None if status == "NOT_CONFIGURED" else datetime.now(timezone.utc),
+        next_attempt_at=datetime.now(timezone.utc) if status == "QUEUED" else None,
     )
     db.add(notification)
     db.commit()
@@ -158,6 +172,7 @@ def record_attempt(
     *,
     succeeded: bool,
     provider: str | None = None,
+    provider_message_id: str | None = None,
     error_message: str | None = None,
     now: datetime | None = None,
 ) -> Notification:
@@ -170,6 +185,7 @@ def record_attempt(
     notification.last_attempt_at = reference
     notification.retry_count = (notification.retry_count or 0) + 1
     notification.provider = provider or notification.provider
+    notification.provider_message_id = provider_message_id or notification.provider_message_id
 
     if succeeded:
         notification.status = "SENT"
@@ -214,7 +230,10 @@ def channel_status(db: Session) -> List[dict]:
     report = []
     for channel in sorted(SUPPORTED_CHANNELS):
         channel_rows = [row for row in rows if row.channel == channel]
-        if channel in EXTERNAL_CHANNELS:
+        if channel in {"EMAIL", "WHATSAPP"}:
+            configured = _external_transport_configured(channel)
+            state = "CONFIGURED" if configured else "NOT_CONFIGURED"
+        elif channel in EXTERNAL_CHANNELS:
             configured = _external_transport_configured(channel)
             state = "NOT_IMPLEMENTED" if configured else "NOT_CONFIGURED"
         else:
@@ -223,10 +242,11 @@ def channel_status(db: Session) -> List[dict]:
             {
                 "channel": channel,
                 "configuration_state": state,
-                "queued": sum(1 for row in channel_rows if row.status in ("QUEUED", "RETRYING")),
+                "queued": sum(1 for row in channel_rows if row.status in ("QUEUED", "RETRYING", "SENDING")),
                 "sent": sum(1 for row in channel_rows if row.status == "SENT"),
                 "failed": sum(1 for row in channel_rows if row.status == "FAILED"),
                 "not_configured": sum(1 for row in channel_rows if row.status == "NOT_CONFIGURED"),
+                "retrying": sum(1 for row in channel_rows if row.status == "RETRYING"),
             }
         )
     return report

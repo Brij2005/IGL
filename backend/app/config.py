@@ -17,14 +17,16 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     ENVIRONMENT: Literal["development", "test", "production", "staging"] = "development"
 
-    # Access control. This build has no authentication at all: no login, no
-    # password verification, no token issuance and no token validation. While
-    # ALLOW_ANONYMOUS_ACCESS is true every endpoint is reachable without a
-    # credential, which is only suitable for a localhost demo: this API does not
-    # accept or enforce identity headers from a reverse proxy. Setting it to
-    # false makes every access-control dependency refuse
-    # the request instead of pretending that an identity exists.
+    # Anonymous access is a development-only convenience. Shared deployments
+    # use signed bearer tokens and must provide the JWT signing key.
     ALLOW_ANONYMOUS_ACCESS: bool = True
+    AUTH_JWT_SECRET_KEY: SecretStr | None = None
+    AUTH_JWT_ISSUER: str = "igl-safety-intelligence"
+    AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, ge=5, le=1440)
+    INITIAL_ADMIN_USERNAME: str | None = None
+    INITIAL_ADMIN_EMAIL: str | None = None
+    INITIAL_ADMIN_FULL_NAME: str | None = None
+    INITIAL_ADMIN_PASSWORD: SecretStr | None = None
 
     # Database
     DATABASE_URL: str = f"sqlite:///{Path(__file__).resolve().parents[2] / 'data' / 'database.db'}"
@@ -95,7 +97,15 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str | None = None
     SMTP_PASSWORD: SecretStr | None = None
     SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
     NOTIFICATION_FROM_ADDRESS: str | None = None
+    SMTP_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0.1, le=120.0)
+    NOTIFICATION_RECIPIENTS: list[str] = Field(default_factory=list)
+    WHATSAPP_ACCESS_TOKEN: SecretStr | None = None
+    WHATSAPP_PHONE_NUMBER_ID: str | None = None
+    WHATSAPP_API_VERSION: str | None = None
+    WHATSAPP_RECIPIENTS: list[str] = Field(default_factory=list)
+    WHATSAPP_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0.1, le=120.0)
     WEBHOOK_URL: SecretStr | None = None
     WEBHOOK_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.1, le=120.0)
 
@@ -142,13 +152,29 @@ class Settings(BaseSettings):
 
         if not self.is_local_environment and self.ALLOW_ANONYMOUS_ACCESS:
             raise ValueError(
-                "Anonymous access is only permitted in development/test; this build has no authentication"
+                "Anonymous access is only permitted in development/test"
             )
+        if not self.ALLOW_ANONYMOUS_ACCESS:
+            jwt_secret = self.AUTH_JWT_SECRET_KEY.get_secret_value() if self.AUTH_JWT_SECRET_KEY else ""
+            if len(jwt_secret.encode("utf-8")) < 32:
+                raise ValueError("AUTH_JWT_SECRET_KEY must contain at least 32 bytes when anonymous access is disabled")
+        bootstrap_values = (self.INITIAL_ADMIN_USERNAME, self.INITIAL_ADMIN_EMAIL, self.INITIAL_ADMIN_FULL_NAME, self.INITIAL_ADMIN_PASSWORD)
+        if any(bootstrap_values) and not all(bootstrap_values):
+            raise ValueError("INITIAL_ADMIN_USERNAME, EMAIL, FULL_NAME, and PASSWORD must be configured together")
+        if self.INITIAL_ADMIN_PASSWORD:
+            password_length = len(self.INITIAL_ADMIN_PASSWORD.get_secret_value().encode("utf-8"))
+            if password_length < 12 or password_length > 72:
+                raise ValueError("INITIAL_ADMIN_PASSWORD must contain 12 to 72 UTF-8 bytes")
 
         if self.CAMERA_RECONNECT_MAX_DELAY_SECONDS < self.CAMERA_RECONNECT_INITIAL_DELAY_SECONDS:
             raise ValueError("CAMERA_RECONNECT_MAX_DELAY_SECONDS must not be below the initial delay")
         if self.NOTIFICATION_RETRY_MAX_SECONDS < self.NOTIFICATION_RETRY_BASE_SECONDS:
             raise ValueError("NOTIFICATION_RETRY_MAX_SECONDS must not be below the base delay")
+        if self.SMTP_USE_TLS and self.SMTP_USE_SSL:
+            raise ValueError("SMTP_USE_TLS and SMTP_USE_SSL cannot both be enabled")
+        smtp_password = self.SMTP_PASSWORD.get_secret_value().strip() if self.SMTP_PASSWORD else ""
+        if bool(self.SMTP_USERNAME) != bool(smtp_password):
+            raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be configured together")
 
         return self
 

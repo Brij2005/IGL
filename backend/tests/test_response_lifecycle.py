@@ -357,7 +357,7 @@ def test_declared_permissions_are_closed_when_anonymous_access_is_disabled(db_se
                 json={"event_id": event.id, "title": "Should be refused"}
             )
             assert refused.status_code == 401
-            assert "Unmet requirement" in refused.json()["detail"]
+            assert refused.json()["detail"] == "Authentication required"
         finally:
             monkeypatch.setattr(settings, "ALLOW_ANONYMOUS_ACCESS", True)
         # Health stays reachable so monitoring still works when writes are closed.
@@ -365,13 +365,8 @@ def test_declared_permissions_are_closed_when_anonymous_access_is_disabled(db_se
     assert db_session.query(Incident).count() == 0
 
 
-def test_corrective_action_writes_declare_their_own_requirement(db_session):
-    """The endpoint declares corrective-actions:write; nothing can check it yet.
-
-    This build has no authentication, so the requirement cannot be evaluated
-    against an identity. The declaration stays visible and the write is refused
-    outright only when anonymous access is disabled.
-    """
+def test_corrective_action_requires_authentication_when_anonymous_is_disabled(db_session):
+    """Anonymous development mode is permissive; closed mode requires a token."""
     seed_reference_roles(db_session)
     incident = create_incident(db_session)
     manager_client, _ = _client_as(db_session, "perm_action_manager", "PLANT_MANAGER")
@@ -394,7 +389,7 @@ def test_corrective_action_writes_declare_their_own_requirement(db_session):
                 json={"action_description": "Refused attempt", "incident_id": incident.id}
             )
             assert refused.status_code == 401
-            assert "corrective_actions:manage" in refused.json()["detail"]
+            assert refused.json()["detail"] == "Authentication required"
         finally:
             settings.ALLOW_ANONYMOUS_ACCESS = original
     assert db_session.query(CorrectiveAction).count() == 1

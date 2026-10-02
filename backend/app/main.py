@@ -3,7 +3,9 @@ FastAPI Main Application Entry Point for IGL Industrial AI Safety & Incident Int
 """
 import sys
 import os
+import bcrypt
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,25 +27,26 @@ sys.path.insert(0, BACKEND_DIR)
 try:
     from app.config import settings
     from app.database import engine, SessionLocal, require_database_at_migration_head
-    from app.models import Role
+    from app.models import Role, User
     from app.api import api_router
     from app.services.inference_pipeline import pipeline_manager
     from app.services.continuous_health import camera_health_worker
     from app.services.safety_event_worker import safety_event_worker
+    from app.services.notification_worker import notification_delivery_worker
     from app.services.system_health import collect_system_health
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import engine, SessionLocal, require_database_at_migration_head
-    from backend.app.models import Role
+    from backend.app.models import Role, User
     from backend.app.api import api_router
     from backend.app.services.inference_pipeline import pipeline_manager
     from backend.app.services.continuous_health import camera_health_worker
     from backend.app.services.safety_event_worker import safety_event_worker
+    from backend.app.services.notification_worker import notification_delivery_worker
     from backend.app.services.system_health import collect_system_health
 
 
-# Reference roles. These are responsibility labels, not credentials: nothing
-# authenticates against them in this build. They are still needed because an
+# Reference roles. They are needed because an
 # incident reporter, an assignee and a notification audience are all named by
 # role, and because escalation and notification policies validate their target
 # role against this list.
@@ -108,29 +111,54 @@ def seed_reference_roles(db: Session):
         db.commit()
 
 
+def seed_initial_admin(db: Session):
+    """Create the configured first administrator only when none exists."""
+    if not settings.INITIAL_ADMIN_USERNAME:
+        return
+    admin_role = db.query(Role).filter(Role.name == "ADMIN").first()
+    if admin_role is None:
+        raise RuntimeError("ADMIN reference role is unavailable")
+    if db.query(User.id).join(Role).filter(Role.name == "ADMIN").first():
+        return
+    password = settings.INITIAL_ADMIN_PASSWORD.get_secret_value()
+    db.add(User(
+        username=settings.INITIAL_ADMIN_USERNAME,
+        email=settings.INITIAL_ADMIN_EMAIL,
+        full_name=settings.INITIAL_ADMIN_FULL_NAME,
+        role_id=admin_role.id,
+        hashed_password=bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii"),
+        password_changed_at=datetime.now(timezone.utc),
+        is_active=True,
+    ))
+    db.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events management.
 
-    Nothing here asks for a username or password, and no administrator account is
-    created: this build has no authentication. Startup only verifies that the
-    database is at migration head, prepares the configured model if one exists,
-    and seeds the reference role records used to resolve responsibility.
+    Startup verifies the migration head, prepares configured model weights,
+    seeds roles, and optionally creates the operator-configured first admin.
     """
     require_database_at_migration_head()
     pipeline_manager.prepare_model()
     db = SessionLocal()
     try:
         seed_reference_roles(db)
+        seed_initial_admin(db)
+        if not settings.ALLOW_ANONYMOUS_ACCESS and db.query(User.id).join(Role).filter(Role.name == "ADMIN", User.is_active.is_(True)).count() == 0:
+            raise RuntimeError("Authentication requires an active ADMIN; configure INITIAL_ADMIN_* for first startup")
     finally:
         db.close()
     camera_health_worker.start()
     # Escalation evaluation is off unless an operator enables it; the worker
     # reports NOT_CONFIGURED in that case rather than silently doing nothing.
     safety_event_worker.start()
+    notification_delivery_worker.start()
     yield
     # Shutdown
     safety_event_worker.stop()
+    notification_delivery_worker.stop()
     camera_health_worker.stop()
     pipeline_manager.stop_all()
     engine.dispose()
@@ -188,7 +216,7 @@ def root():
         "camera_health_worker": system_health["camera_health_worker"],
         "inference_pipeline": system_health["inference_pipeline"],
         "access_control": system_health["access_control"],
-        "authentication": "NOT_IMPLEMENTED",
+        "authentication": settings.authentication_state(),
         "validation_status": system_health["validation_status"],
         "igl_validated": system_health["igl_validated"],
         "igl_configuration_status": system_health["igl_configuration_status"],

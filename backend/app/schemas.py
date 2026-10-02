@@ -1,13 +1,12 @@
-"""Pydantic schemas for identity records and audit output.
+"""Pydantic schemas for identity records, authentication input, and audit output.
 
-There are no token, login or password schemas in this build: authentication was
-removed. An identity record names an operator that work can be assigned to; it
-cannot sign in, and no response contains credential material.
+Credential fields are accepted only on write schemas. Public identity responses
+never include password hashes or raw passwords.
 """
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 # ============================================================================
@@ -44,6 +43,14 @@ class IdentityBase(BaseModel):
 
 class IdentityCreate(IdentityBase):
     role_name: Optional[str] = "OPERATOR"
+    password: Optional[SecretStr] = Field(None, min_length=12, max_length=72)
+
+    @field_validator("password")
+    @classmethod
+    def bcrypt_byte_limit(cls, value):
+        if value is not None and len(value.get_secret_value().encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes")
+        return value
 
 
 class IdentityRoleUpdate(BaseModel):

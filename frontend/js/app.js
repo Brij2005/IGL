@@ -1,6 +1,7 @@
 "use strict";
 
 const API_STORAGE_KEY = "iglSafetyApiBase";
+const AUTH_TOKEN_KEY = "iglSafetyAccessToken";
 const DEFAULT_API = "http://127.0.0.1:8000/api/v1";
 const ALARM_EVENT_TYPES = new Set(["FIRE", "SMOKE", "RESTRICTED_ZONE_INTRUSION"]);
 const labels = {
@@ -21,6 +22,7 @@ if (storedApiBase !== sanitizedApiBase) {
   sessionStorage.setItem(API_STORAGE_KEY, sanitizedApiBase);
 }
 let apiBase = sanitizedApiBase;
+let authToken = sessionStorage.getItem(AUTH_TOKEN_KEY);
 let eventsCache = [];
 let currentView = "overview";
 let activeAlarmEvents = [];
@@ -38,6 +40,7 @@ let webcamBusy = false;
 let webcamCameraError = null;
 
 const appShell = document.querySelector("#app-shell");
+const loginShell = document.querySelector("#login-shell");
 const content = document.querySelector("#view-content");
 const globalMessage = document.querySelector("#global-message");
 
@@ -53,13 +56,12 @@ function showMessage(message, visible = true) {
 }
 
 async function request(path, options = {}) {
-  // No Authorization header: this deployment has no authentication, so the API
-  // accepts anonymous access and rejects nothing on the basis of identity.
   const response = await fetch(`${apiBase}${path}`, {
     ...options,
     headers: {
       ...(options.headers || {}),
       ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
     },
   });
   if (!response.ok) {
@@ -68,6 +70,11 @@ async function request(path, options = {}) {
       const payload = await response.json();
       detail = payload.detail || detail;
     } catch { /* Keep the HTTP status only. */ }
+    if (response.status === 401 && authToken) {
+      authToken = null;
+      sessionStorage.removeItem(AUTH_TOKEN_KEY);
+      showLogin("Your session expired or was revoked. Sign in again.");
+    }
     throw new Error(detail);
   }
   if (response.status === 204) return null;
@@ -141,7 +148,7 @@ async function renderOverview() {
     </div>`;
   content.insertAdjacentHTML("beforeend", `<div class="content-grid operational-records">
     <section class="section"><div class="section-head"><h2>Recent incidents</h2><span>DATABASE RECORDS</span></div>${incidents.length ? `<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Severity</th><th>Status</th><th>Created</th></tr></thead><tbody>${incidents.map((incident) => `<tr><td>${escapeHtml(incident.title)}</td><td>${escapeHtml(incident.severity)}</td><td>${escapeHtml(incident.status)}</td><td>${escapeHtml(formatDate(incident.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No incident records.</strong>Incidents require an existing event and operator action.</div></div>`}</section>
-    <section class="section"><div class="section-head"><h2>Notification state</h2><span>QUEUE IS NOT DELIVERY</span></div><div class="section-body">${stateRows(channels.map((channel) => [channel.channel, `${channel.configuration_state} · QUEUED ${channel.queued} · SENT ${channel.sent}`]))}</div>${notifications.length ? `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>State</th><th>Recipient</th><th>Updated</th></tr></thead><tbody>${notifications.map((item) => `<tr><td>${escapeHtml(item.channel)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.recipient_role || item.recipient || "UNASSIGNED")}</td><td>${escapeHtml(formatDate(item.sent_at || item.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No notifications queued.</strong>External channel delivery is not implemented.</div></div>`}</section>
+    <section class="section"><div class="section-head"><h2>Notification state</h2><span>PROVIDER ACCEPTANCE IS NOT READ RECEIPT</span></div><div class="section-body">${stateRows(channels.map((channel) => [channel.channel, `${channel.configuration_state} · QUEUED ${channel.queued} · SENT ${channel.sent} · FAILED ${channel.failed}`]))}</div>${notifications.length ? `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>State</th><th>Recipient</th><th>Updated</th></tr></thead><tbody>${notifications.map((item) => `<tr><td>${escapeHtml(item.channel)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.recipient_role || item.recipient || "UNASSIGNED")}</td><td>${escapeHtml(formatDate(item.sent_at || item.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No notifications queued.</strong>Event notification policies create rows when a supported event is confirmed.</div></div>`}</section>
   </div>`);
   setApiIndicator(health.overall_status, health.overall_status);
 }
@@ -624,7 +631,7 @@ async function renderAnalytics() {
 }
 
 async function renderConfiguration() {
-  const [plants, areas, zones, rules, cameras, detectorConfigs, safetyRules, thresholds, escalationPolicies, notificationPolicies] = await Promise.all([
+  const [plants, areas, zones, rules, cameras, detectorConfigs, safetyRules, thresholds, escalationPolicies, notificationPolicies, notificationChannels] = await Promise.all([
     request("/configuration/plants"),
     request("/configuration/areas"),
     request("/configuration/zones"),
@@ -635,6 +642,7 @@ async function renderConfiguration() {
     request("/configuration/operating-thresholds"),
     request("/configuration/escalation-policies"),
     request("/configuration/notification-policies"),
+    request("/notifications/channels/status"),
   ]);
   const options = (items, label) => items.length
     ? items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(label(item))}</option>`).join("")
@@ -675,10 +683,11 @@ async function renderConfiguration() {
       <form class="section config-form" data-endpoint="/configuration/escalation-policies" data-number-fields="escalate_after_seconds,escalation_level"><div class="section-head"><h2>Escalation policy</h2><span>NO DELIVERY GUARANTEE</span></div><div class="section-body">
         <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Camera<select name="camera_id">${scopedOptions(cameras, (item) => `${item.name} (${item.code})`)}</select></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Delay seconds<input name="escalate_after_seconds" type="number" min="1" value="900" required></label><label>From role<input name="from_role" maxlength="50"></label><label>To role<select name="to_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option></select></label><label>Level<input name="escalation_level" type="number" min="1" max="10" value="1" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><button class="inline-button" type="submit">Save escalation policy</button>
       </div></form>
-      <form class="section config-form" data-endpoint="/configuration/notification-policies" data-number-fields="dedup_window_seconds" data-checkbox-fields="is_enabled"><div class="section-head"><h2>Notification policy</h2><span>QUEUE ONLY; EXTERNAL SENDERS UNAVAILABLE</span></div><div class="section-body">
-        <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Channel<select name="channel"><option>DASHBOARD</option><option>EMAIL</option><option>WEBHOOK</option><option>SMS</option><option>TEAMS</option><option>BUZZER</option></select></label><label>Recipient role<select name="recipient_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option></select></label><label>Deduplication window seconds<input name="dedup_window_seconds" type="number" min="0" max="86400" value="300" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><label class="checkbox-label"><input name="is_enabled" type="checkbox" checked> Enable policy</label><button class="inline-button" type="submit">Save notification policy</button>
+      <form class="section config-form" data-endpoint="/configuration/notification-policies" data-number-fields="dedup_window_seconds" data-checkbox-fields="is_enabled"><div class="section-head"><h2>Notification policy</h2><span>DELIVERY STATUS BELOW</span></div><div class="section-body">
+        <label>Name<input name="name" required maxlength="150"></label><label>Event type<input name="event_type" maxlength="50"></label><label>Severity<input name="severity" maxlength="20"></label><label>Zone<select name="zone_id">${scopedOptions(zones, (item) => `${item.name} (${item.code})`)}</select></label><label>Channel<select name="channel"><option>DASHBOARD</option><option>EMAIL</option><option>WHATSAPP</option><option>WEBHOOK</option><option>SMS</option><option>TEAMS</option><option>BUZZER</option></select></label><label>Recipient role<select name="recipient_role" required><option>ADMIN</option><option>SAFETY_OFFICER</option><option>PLANT_MANAGER</option><option>OPERATOR</option></select></label><label>Deduplication window seconds<input name="dedup_window_seconds" type="number" min="0" max="86400" value="300" required></label><label>Source reference<input name="source_reference" maxlength="500"></label><label class="checkbox-label"><input name="is_enabled" type="checkbox" checked> Enable policy</label><button class="inline-button" type="submit">Save notification policy</button>
       </div></form>
     </div></details>
+    <section class="section notification-transport"><div class="section-head"><h2>Delivery transports</h2><span>TEST SENDS CONTACT REAL RECIPIENTS</span></div><div class="section-body">${stateRows(notificationChannels.filter((item) => ["EMAIL", "WHATSAPP"].includes(item.channel)).map((item) => [item.channel, `${item.configuration_state} · QUEUED ${item.queued} · SENT ${item.sent} · FAILED ${item.failed}`]))}<p class="config-note">Configure transport credentials in the backend environment, restart the API, then send only to an operator-approved recipient. A provider acceptance is not proof that a person read the message.</p><div class="notification-test-grid"><form id="email-test-form"><label>Test email recipient<input name="recipient" type="email" required autocomplete="email"></label><button class="inline-button" type="submit">Send test email</button></form><form id="whatsapp-test-form"><label>WhatsApp recipient in E.164 format<input name="recipient" type="tel" required placeholder="+15551234567" autocomplete="tel"></label><button class="inline-button" type="submit">Send test WhatsApp</button></form></div></div></section>
     <div class="content-grid configuration-records">
       ${currentState("Plants", plants, (items) => `<table><thead><tr><th>Name</th><th>Code</th><th>Location</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.location || "NOT_AVAILABLE")}</td></tr>`).join("")}</tbody></table>`)}
       ${currentState("Zones", zones, (items) => `<table><thead><tr><th>Name</th><th>Type</th><th>Geometry</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.zone_type)}</td><td>${item.geometry_json ? "CONFIGURED" : "NOT_CONFIGURED"}</td></tr>`).join("")}</tbody></table>`)}
@@ -721,6 +730,15 @@ async function renderConfiguration() {
       await request(endpoint, { method: "POST", body: JSON.stringify(values) });
       showMessage("Configuration saved. Validation state remains NOT_VALIDATED; anonymous actor attribution is unavailable.");
       await renderConfiguration();
+    } catch (error) { showMessage(error.message); }
+  }));
+  content.querySelectorAll("#email-test-form, #whatsapp-test-form").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const recipient = new FormData(form).get("recipient");
+    const channel = form.id === "email-test-form" ? "email" : "whatsapp";
+    try {
+      const result = await request(`/notifications/test/${channel}`, { method: "POST", body: JSON.stringify({ recipient }) });
+      showMessage(`${result.status}: ${result.error || `accepted by ${result.provider}`}`);
     } catch (error) { showMessage(error.message); }
   }));
 }
@@ -775,15 +793,58 @@ function setApiIndicator(status, text) {
 }
 
 function showApplication() {
+  loginShell.hidden = true;
   appShell.hidden = false;
+  document.querySelector("#logout-button").hidden = !authToken;
   startAlarmPolling();
   navigate(currentView);
 }
 
+function showLogin(message = "") {
+  stopWebcamPolling();
+  if (alarmPollingTimer) clearInterval(alarmPollingTimer);
+  alarmPollingTimer = null;
+  appShell.hidden = true;
+  loginShell.hidden = false;
+  document.querySelector("#login-message").textContent = message;
+}
+
+async function initializeApplication() {
+  try {
+    const response = await fetch(`${apiBase}/system/health`);
+    if (!response.ok) throw new Error(`API health unavailable (${response.status})`);
+    const health = await response.json();
+    if (String(health.access_control || "").startsWith("ANONYMOUS_ACCESS_ENABLED")) {
+      showApplication();
+      return;
+    }
+    if (authToken) {
+      await request("/auth/me");
+      showApplication();
+      return;
+    }
+    showLogin("Sign in to access the operations dashboard.");
+  } catch (error) {
+    showLogin(error.message);
+  }
+}
+
 document.querySelector("#api-base").value = apiBase;
-document.querySelector("#api-base").addEventListener("change", (event) => {
+document.querySelector("#login-api-base").value = apiBase;
+document.querySelector("#login-api-base").addEventListener("change", (event) => {
+  authToken = null;
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
   apiBase = event.target.value.trim().replace(/\/$/, "");
   sessionStorage.setItem(API_STORAGE_KEY, apiBase);
+  document.querySelector("#api-base").value = apiBase;
+  initializeApplication();
+});
+document.querySelector("#api-base").addEventListener("change", (event) => {
+  authToken = null;
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  apiBase = event.target.value.trim().replace(/\/$/, "");
+  sessionStorage.setItem(API_STORAGE_KEY, apiBase);
+  document.querySelector("#login-api-base").value = apiBase;
   navigate(currentView);
 });
 
@@ -792,6 +853,31 @@ document.querySelector("#navigation").addEventListener("click", (event) => {
   if (button) navigate(button.dataset.view);
 });
 document.querySelector("#refresh-button").addEventListener("click", () => navigate(currentView));
+document.querySelector("#logout-button").addEventListener("click", () => {
+  authToken = null;
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  showLogin("You have signed out.");
+});
+document.querySelector("#login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = Object.fromEntries(new FormData(form).entries());
+  document.querySelector("#login-message").textContent = "Signing in…";
+  try {
+    const response = await fetch(`${apiBase}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || `Sign in failed (${response.status})`);
+    authToken = payload.access_token;
+    sessionStorage.setItem(AUTH_TOKEN_KEY, authToken);
+    form.reset();
+    showApplication();
+  } catch (error) {
+    document.querySelector("#login-message").textContent = error.message;
+  }
+});
 
-// No login gate: the application loads directly against the configured API.
-showApplication();
+initializeApplication();

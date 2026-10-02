@@ -47,6 +47,7 @@ class NotificationOut(BaseModel):
     last_attempt_at: Optional[datetime] = None
     next_attempt_at: Optional[datetime] = None
     provider: Optional[str] = None
+    provider_message_id: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,6 +65,7 @@ class NotificationChannelStatusOut(BaseModel):
     sent: int = 0
     failed: int = 0
     not_configured: int = 0
+    retrying: int = 0
 
 
 class ModelHealthOut(BaseModel):

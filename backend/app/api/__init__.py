@@ -1,13 +1,13 @@
 """
 API route package initializer.
 
-There is no authentication router: this build has no login, no token issuance
-and no token validation. The identity router exposes the operator directory and
-the audit trail, which are operational data rather than authentication.
+The authentication router handles local username/password login and bearer
+tokens. The identity router exposes operator directory and audit operations.
 """
 from fastapi import APIRouter
 
 try:
+    from app.api.auth import router as auth_router
     from app.api.identity import router as identity_router
     from app.api.cameras import router as cameras_router
     from app.api.system_health import router as system_health_router
@@ -20,6 +20,7 @@ try:
     from app.api.escalation import router as escalation_router
     from app.api.responses import router as responses_router
 except ImportError:
+    from backend.app.api.auth import router as auth_router
     from backend.app.api.identity import router as identity_router
     from backend.app.api.cameras import router as cameras_router
     from backend.app.api.system_health import router as system_health_router
@@ -33,6 +34,7 @@ except ImportError:
     from backend.app.api.responses import router as responses_router
 
 api_router = APIRouter()
+api_router.include_router(auth_router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(identity_router, prefix="/identity", tags=["Operator Identity & Audit"])
 api_router.include_router(cameras_router, prefix="/cameras", tags=["Camera Management & Health"])
 api_router.include_router(system_health_router, prefix="/system", tags=["Inference Health"])

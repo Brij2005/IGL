@@ -37,6 +37,7 @@ from app.models import (  # noqa: E402
     EventEscalation,
     EventEvidence,
     NotificationPolicy,
+    Notification,
     OperatingThreshold,
     Plant,
     Role,
@@ -53,6 +54,7 @@ from app.services.safety_engine import (  # noqa: E402
     verification_policy_from_configuration
 )
 from app.services.safety_orchestrator import SafetyEventOrchestrator  # noqa: E402
+from app.services.safety_event_worker import enqueue_escalation_notifications  # noqa: E402
 from app.services.safety_engine import temporal_registry  # noqa: E402
 
 NOW = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
@@ -736,6 +738,30 @@ def test_escalation_with_a_matching_policy_creates_a_record(topology):
     escalation = db.query(EventEscalation).filter(EventEscalation.event_id == event.id).one()
     assert escalation.to_role == "SAFETY_OFFICER"
     assert escalation.acknowledged_at is None
+
+
+def test_escalation_queues_dashboard_and_configured_target_channels(topology):
+    db, camera, _zone, _officer = topology
+    event = _open_event(db, camera)
+    db.add(NotificationPolicy(
+        name="Safety officer email on critical fire",
+        event_type="FIRE",
+        severity="CRITICAL",
+        recipient_role="SAFETY_OFFICER",
+        channel="EMAIL",
+        is_enabled=True,
+    ))
+    db.commit()
+
+    created = enqueue_escalation_notifications(db, event, [{"to_role": "SAFETY_OFFICER", "escalation_level": 2}])
+    rows = db.query(Notification).filter(Notification.event_id == event.id).order_by(Notification.channel).all()
+
+    assert created == 2
+    assert [(row.channel, row.recipient_role) for row in rows] == [
+        ("DASHBOARD", "SAFETY_OFFICER"),
+        ("EMAIL", "SAFETY_OFFICER"),
+    ]
+    assert next(row for row in rows if row.channel == "EMAIL").status == "NOT_CONFIGURED"
 
 
 def test_escalation_is_not_due_before_the_configured_window(topology):

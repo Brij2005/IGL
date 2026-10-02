@@ -1,6 +1,6 @@
 """Event listing and validated workflow transitions.
 
-These endpoints are reachable without credentials: this build has no authentication.
+Access is anonymous only when the development setting explicitly permits it.
 Every state change is written to the audit log with a NULL actor.
 """
 from typing import Optional

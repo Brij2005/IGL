@@ -26,7 +26,7 @@ router = APIRouter()
 
 
 @router.get("/health")
-def get_system_health(actor: Optional[User] = Depends(resolve_actor)):
+def get_system_health():
     """Derived subsystem state. The process being up is reported separately from
     database, model, camera, and validation state."""
     return collect_system_health()

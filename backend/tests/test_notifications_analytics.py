@@ -118,7 +118,7 @@ def test_role_addressed_notification_response_allows_null_user_id():
     assert response.recipient_role == "SAFETY_OFFICER"
 
 
-def test_configured_external_channel_is_not_claimed_deliverable(db_session, monkeypatch):
+def test_configured_email_channel_is_queued_for_real_delivery(db_session, monkeypatch):
     from app.config import settings
     from app.services.notification_engine import channel_status
 
@@ -135,10 +135,151 @@ def test_configured_external_channel_is_not_claimed_deliverable(db_session, monk
     )
     email_status = next(item for item in channel_status(db_session) if item["channel"] == "EMAIL")
 
-    assert notification.status == "NOT_IMPLEMENTED"
-    assert "sender is not implemented" in notification.error_message
+    assert notification.status == "QUEUED"
+    assert notification.error_message is None
     assert notification.sent_at is None
-    assert email_status["configuration_state"] == "NOT_IMPLEMENTED"
+    assert email_status["configuration_state"] == "CONFIGURED"
+
+
+def test_email_sender_reports_unconfigured_without_claiming_success(monkeypatch):
+    from app.config import settings
+    from app.services.notification_delivery import send_email
+
+    monkeypatch.setattr(settings, "SMTP_HOST", None)
+    result = send_email(["operator@example.test"], "test", "test")
+    assert result["status"] == "EMAIL_NOT_CONFIGURED"
+    assert result["provider"] == "SMTP"
+
+
+def test_email_sender_uses_real_smtp_transport_without_exposing_credentials(monkeypatch):
+    import smtplib
+    from app.config import settings
+    from app.services.notification_delivery import send_email
+
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            sent["connection"] = (host, port, timeout)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def ehlo(self):
+            pass
+
+        def starttls(self, context):
+            sent["tls"] = context is not None
+
+        def login(self, username, password):
+            sent["login"] = (username, password)
+
+        def send_message(self, message, to_addrs):
+            sent["message"] = message
+            sent["recipients"] = to_addrs
+            return {}
+
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.test")
+    monkeypatch.setattr(settings, "SMTP_PORT", 587)
+    monkeypatch.setattr(settings, "SMTP_USERNAME", "operator")
+    monkeypatch.setattr(settings, "SMTP_PASSWORD", __import__("pydantic").SecretStr("private-test-secret"))
+    monkeypatch.setattr(settings, "SMTP_USE_TLS", True)
+    monkeypatch.setattr(settings, "SMTP_USE_SSL", False)
+    monkeypatch.setattr(settings, "NOTIFICATION_FROM_ADDRESS", "safety@example.test")
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+
+    result = send_email(["operator@example.test"], "Safety event", "Real event summary")
+    assert result["status"] == "SENT"
+    assert sent["recipients"] == ["operator@example.test"]
+    assert sent["message"]["Subject"] == "Safety event"
+    assert sent["login"] == ("operator", "private-test-secret")
+
+
+def test_whatsapp_sender_reports_unconfigured_and_validates_real_recipient(monkeypatch):
+    from pydantic import SecretStr
+    from app.config import settings
+    from app.services.notification_delivery import send_whatsapp
+
+    monkeypatch.setattr(settings, "WHATSAPP_ACCESS_TOKEN", None)
+    assert send_whatsapp("+15551234567", "test")["status"] == "WHATSAPP_NOT_CONFIGURED"
+
+    monkeypatch.setattr(settings, "WHATSAPP_ACCESS_TOKEN", SecretStr("private-token"))
+    monkeypatch.setattr(settings, "WHATSAPP_PHONE_NUMBER_ID", "1234567890")
+    monkeypatch.setattr(settings, "WHATSAPP_API_VERSION", "v23.0")
+    assert send_whatsapp("not-a-phone", "test")["status"] == "DELIVERY_FAILED"
+
+
+def test_whatsapp_sender_reports_provider_acceptance_only(monkeypatch):
+    from pydantic import SecretStr
+    from app.config import settings
+    from app.services.notification_delivery import send_whatsapp
+
+    captured = {}
+
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"messages": [{"id": "wamid.test-accepted"}]}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["headers"] = kwargs["headers"]
+        captured["json"] = kwargs["json"]
+        return Response()
+
+    monkeypatch.setattr(settings, "WHATSAPP_ACCESS_TOKEN", SecretStr("private-token"))
+    monkeypatch.setattr(settings, "WHATSAPP_PHONE_NUMBER_ID", "1234567890")
+    monkeypatch.setattr(settings, "WHATSAPP_API_VERSION", "v23.0")
+    monkeypatch.setattr("app.services.notification_delivery.httpx.post", fake_post)
+    result = send_whatsapp("+15551234567", "Test message")
+    assert result["status"] == "SENT"
+    assert result["message_id"] == "wamid.test-accepted"
+    assert "private-token" not in captured["url"]
+    assert captured["headers"]["Authorization"] == "Bearer private-token"
+    assert captured["json"]["messaging_product"] == "whatsapp"
+
+
+def test_delivery_worker_records_sent_only_after_transport_acceptance(db_session, monkeypatch):
+    from app.config import settings
+    from app.models import Notification
+    from app.services.notification_delivery import deliver_due_notifications
+
+    user, _, event = add_actual_record_fixtures(db_session)
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.test")
+    monkeypatch.setattr(settings, "NOTIFICATION_FROM_ADDRESS", "safety@example.test")
+    row = enqueue_notification(db_session, event_id=event.id, user_id=user.id, channel="EMAIL", recipient=user.email)
+    monkeypatch.setattr(
+        "app.services.notification_delivery.deliver_notification",
+        lambda _db, _row: {"status": "SENT", "provider": "SMTP", "error": None, "message_id": "smtp-test-accepted"},
+    )
+
+    summary = deliver_due_notifications(db_session)
+    db_session.refresh(row)
+    assert summary["sent"] == 1
+    assert row.status == "SENT"
+    assert row.retry_count == 1
+    assert row.sent_at is not None
+    assert row.provider == "SMTP"
+    assert row.provider_message_id == "smtp-test-accepted"
+
+
+def test_notification_role_targets_do_not_broadcast_to_unrelated_fallback_recipients(db_session, monkeypatch):
+    from app.config import settings
+    from app.services.notification_delivery import _email_recipients
+
+    user, _, event = add_actual_record_fixtures(db_session)
+    monkeypatch.setattr(settings, "NOTIFICATION_RECIPIENTS", ["fallback@example.test"])
+    role_target = enqueue_notification(
+        db_session,
+        event_id=event.id,
+        recipient_role="TEST_OPERATOR",
+        channel="EMAIL",
+        recipient="TEST_OPERATOR",
+    )
+    assert _email_recipients(db_session, role_target) == [user.email]
 
 
 def test_escalation_can_be_acknowledged_without_fabricating_an_actor():

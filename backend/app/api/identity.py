@@ -1,16 +1,10 @@
-"""Operator identity directory and audit log access.
-
-There is no login here, and nothing in this module authenticates a request. The
-endpoints manage the identity records that events are assigned to and reported
-against, and they expose the audit trail. Because no request can be attributed
-to a verified person, every audit row written here records a NULL actor and the
-explicit access state ``NO_AUTHENTICATION_ANONYMOUS_ACCESS``.
-"""
+"""Operator account directory and audit log access."""
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.exc import IntegrityError
+import bcrypt
 from sqlalchemy.orm import Session
 
 try:
@@ -40,8 +34,8 @@ except ImportError:  # pragma: no cover
 router = APIRouter()
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
-DIRECTORY_READERS = ("IDENTITY_DIRECTORY",)
-DIRECTORY_WRITERS = ("IDENTITY_DIRECTORY_WRITE",)
+DIRECTORY_READERS = ("users:view",)
+DIRECTORY_WRITERS = ("ADMIN",)
 
 
 def _client_ip(request: Request) -> Optional[str]:
@@ -67,6 +61,9 @@ def create_identity(
     actor: Optional[User] = Depends(require_role(*DIRECTORY_WRITERS)),
 ):
     """Register an operator identity that events can be assigned to."""
+    from app.config import settings
+    if not settings.ALLOW_ANONYMOUS_ACCESS and not identity_in.password:
+        raise HTTPException(status_code=422, detail="A password is required when authenticated access is enabled")
     if db.query(User.id).filter(User.username == identity_in.username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
     if db.query(User.id).filter(User.email == identity_in.email).first():
@@ -83,8 +80,8 @@ def create_identity(
         employee_code=identity_in.employee_code,
         role_id=target_role.id,
         is_active=True,
-        # No credential is stored: this build has no login.
-        hashed_password=None,
+        hashed_password=(bcrypt.hashpw(identity_in.password.get_secret_value().encode("utf-8"), bcrypt.gensalt()).decode("ascii") if identity_in.password else None),
+        password_changed_at=datetime.now(timezone.utc) if identity_in.password else None,
     )
     db.add(identity)
     try:

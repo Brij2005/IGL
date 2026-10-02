@@ -6,4 +6,4 @@ Do not copy test fixture names or coordinates into operational configuration. Au
 
 Current state: `IGL_CONFIGURATION_STATUS = NOT_CONFIGURED`; `IGL_VALIDATED = false`. No IGL rules or thresholds are inferred from generic examples.
 
-Empty schema-shaped templates are under `config/igl/`. They contain no example operating values and are not loaded as live database configuration. Authorized personnel must submit records through the operator configuration API; this build has no authentication, so configuration writes are only suitable for a localhost demo. No import workflow exists.
+Empty schema-shaped templates are under `config/igl/`. They contain no example operating values and are not loaded as live database configuration. Authorized personnel must submit records through the operator configuration API. Use authenticated ADMIN access outside localhost development. No import workflow exists.

@@ -13,7 +13,7 @@ python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 
 The API refuses to start unless the database revision matches the Alembic head. Schema is owned exclusively by the migrations; `init_db()` no longer creates tables and raises instead.
 
-This local build has no authentication. Keep it bound to localhost; do not expose it to an untrusted network or assume an upstream proxy identity is enforced by this API.
+The example config enables anonymous development mode. Keep the API bound to localhost; do not expose it to an untrusted network. To enable login locally or on a shared deployment, set `ALLOW_ANONYMOUS_ACCESS=false` and configure `AUTH_JWT_SECRET_KEY`.
 
 The default SQLite location resolves relative to the project root. Migrations add schema to an existing database; do not delete, recreate, or reset a database as a setup step.
 
@@ -29,9 +29,32 @@ python -m pytest backend/tests -q
 
 Set `MODEL_WEIGHTS_PATH` to an existing local model file. `MODEL_NAME`, `MODEL_VERSION`, and `MODEL_CONFIDENCE_THRESHOLD` provide traceable metadata. The service does not download weights. An absent file yields `MODEL_NOT_CONFIGURED`; an invalid configured path yields `MODEL_INVALID_WEIGHTS`.
 
+## Email and WhatsApp notifications
+
+SMTP settings are `SMTP_HOST`, `SMTP_PORT`, optional paired `SMTP_USERNAME`/`SMTP_PASSWORD`, `SMTP_USE_TLS` (STARTTLS), `SMTP_USE_SSL` (implicit TLS), `SMTP_TIMEOUT_SECONDS`, `NOTIFICATION_FROM_ADDRESS`, and `NOTIFICATION_RECIPIENTS` (JSON string array). TLS modes are mutually exclusive. For WhatsApp Cloud API, configure `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_API_VERSION` (the Graph API version enabled for your Meta app), `WHATSAPP_TIMEOUT_SECONDS`, and `WHATSAPP_RECIPIENTS` (JSON string array of E.164 numbers). Use `.env` or a secret manager; never put tokens in frontend code. The worker starts with the API and attempts queued delivery with bounded retries. The dashboard Configuration page exposes real test-send forms; these contact their selected real recipient and are audit-recorded. Provider acceptance does not guarantee inbox/user receipt. Missing settings remain `NOT_CONFIGURED`.
+
+The WhatsApp sender uses Meta's official `POST /{version}/{phone-number-id}/messages` Cloud API request shape; see [Meta's WhatsApp Cloud API collection](https://www.postman.com/meta/whatsapp-business-platform/documentation/wlk6lh4/whatsapp-cloud-api?entity=request-13382743-071cfa60-0704-41d2-bca2-36ba6bd33dfe).
+
+PowerShell test sends (only to recipients approved to receive an actual test message):
+
+```powershell
+$payload = @{ recipient = "operator@example.com" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/notifications/test/email -ContentType "application/json" -Body $payload
+$payload = @{ recipient = "+15551234567" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/notifications/test/whatsapp -ContentType "application/json" -Body $payload
+```
+
 ## Deployment Boundary
 
-This build has no authentication. `ENVIRONMENT=production` or `staging` rejects `ALLOW_ANONYMOUS_ACCESS=true`; setting it false makes protected routes return 401 because no authentication implementation exists. This is not a production deployment configuration. Keep the demo bound to localhost. Before any shared deployment, implement and review authentication/authorization, select a production database, configure TLS/reverse proxy/network controls, and perform security review. Wildcard CORS is rejected; use exact origins.
+Production/staging reject `ALLOW_ANONYMOUS_ACCESS=true`. Authenticated mode requires a random `AUTH_JWT_SECRET_KEY` of at least 32 bytes and an active admin account. Generate the signing key with:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+For first startup, set `INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_FULL_NAME`, and `INITIAL_ADMIN_PASSWORD` in a protected environment/secret manager. The password must be 12–72 UTF-8 bytes. The API creates this account only if the database has no ADMIN; remove the bootstrap password after provisioning. Login is available at `/api/v1/auth/login`; the frontend presents a sign-in screen automatically when the backend reports authenticated mode. Users can change their password at `/api/v1/auth/password`.
+
+JWT authentication and role/permission checks are implemented, but this repository does not bundle a production secret manager, TLS/reverse proxy, distributed rate limiter, recovery/MFA, certified database topology, or independent security review. Wildcard CORS is rejected; use exact origins. Keep any deployment behind reviewed TLS and network controls.
 
 Run the static dashboard from a second project-root terminal with `python -m http.server 8001 --directory frontend`; open `http://127.0.0.1:8001`.
 

@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.database import Base, get_migration_state
-from app.main import app, seed_reference_roles
+from app.main import app, seed_initial_admin, seed_reference_roles
 from app.models import Role, User
 
 
@@ -60,6 +60,35 @@ def test_startup_seeds_only_fixed_platform_roles():
         session.close()
 
 
+def test_initial_admin_bootstrap_hashes_password_and_never_overwrites_existing_admin(monkeypatch):
+    # This test is intentionally self-contained because it exercises the first
+    # authenticated account creation path, not the shared TestClient fixture.
+    import bcrypt
+    from pydantic import SecretStr
+    from app.config import settings
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        seed_reference_roles(db)
+        monkeypatch.setattr(settings, "INITIAL_ADMIN_USERNAME", "bootstrap-admin")
+        monkeypatch.setattr(settings, "INITIAL_ADMIN_EMAIL", "bootstrap@example.test")
+        monkeypatch.setattr(settings, "INITIAL_ADMIN_FULL_NAME", "Bootstrap Admin")
+        monkeypatch.setattr(settings, "INITIAL_ADMIN_PASSWORD", SecretStr("bootstrap-secure-password"))
+        seed_initial_admin(db)
+        admin = db.query(User).filter(User.username == "bootstrap-admin").one()
+        original_hash = admin.hashed_password
+        assert bcrypt.checkpw(b"bootstrap-secure-password", original_hash.encode("ascii"))
+        settings.INITIAL_ADMIN_PASSWORD = SecretStr("different-password-that-must-not-replace")
+        seed_initial_admin(db)
+        assert db.query(User).filter(User.role.has(name="ADMIN")).count() == 1
+        assert admin.hashed_password == original_hash
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_reference_role_seeding_preserves_existing_configuration():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(bind=engine)
@@ -101,13 +130,10 @@ def test_every_route_responds_after_startup():
     with TestClient(app) as client:
         assert client.get("/").status_code == 200
         assert client.get("/api/v1/openapi.json").status_code == 200
-        # This build has no authentication, so these routes are reachable. The
-        # test records that deliberately permissive behaviour rather than
-        # asserting a protection that this build does not have.
+        # Local test mode explicitly allows anonymous access to operational APIs.
         assert client.get("/api/v1/system/health").status_code == 200
         assert client.get("/api/v1/analytics/summary").status_code == 200
-        # A removed route must be gone, not silently absent.
-        assert client.post("/api/v1/auth/login", json={}).status_code == 404
+        assert client.post("/api/v1/auth/login", json={}).status_code == 422
 
 
 def test_openapi_documents_every_registered_router():
@@ -119,5 +145,5 @@ def test_openapi_documents_every_registered_router():
         "/api/v1/events/{event_id}/evidence", "/api/v1/cameras/webcam/devices"
     ):
         assert any(path.startswith(prefix) for path in paths), prefix
-    # Authentication routes must not reappear in the API document.
-    assert not any(path.startswith("/api/v1/auth") for path in paths)
+    assert "/api/v1/auth/login" in paths
+    assert "/api/v1/auth/me" in paths

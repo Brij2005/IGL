@@ -6,13 +6,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 try:
-    from app.access_control import log_audit_event, require_permission, resolve_actor, require_role
+    from app.access_control import log_audit_event, require_permission, require_role
     from app.database import get_db
     from app.models import Notification, User
     from app.schemas_system import NotificationChannelStatusOut, NotificationOut
     from app.services.notification_engine import channel_status, due_notifications, enqueue_notification
 except ImportError:
-    from backend.app.access_control import log_audit_event, require_permission, resolve_actor, require_role
+    from backend.app.access_control import log_audit_event, require_permission, require_role
     from backend.app.database import get_db
     from backend.app.models import Notification, User
     from backend.app.schemas_system import NotificationChannelStatusOut, NotificationOut
@@ -23,11 +23,24 @@ router = APIRouter()
 
 
 class NotificationRequest(BaseModel):
-    channel: Literal["DASHBOARD", "EMAIL", "WEBHOOK", "SMS", "TEAMS", "BUZZER"] = "DASHBOARD"
+    channel: Literal["DASHBOARD", "EMAIL", "WHATSAPP", "WEBHOOK", "SMS", "TEAMS", "BUZZER"] = "DASHBOARD"
     recipient: str | None = Field(default=None, max_length=255)
     # The audience is a role or a label, not a signed-in user.
     recipient_role: str | None = Field(default=None, max_length=50)
     dedup_window_seconds: int = Field(default=300, ge=0, le=86400)
+
+
+class TestDeliveryRequest(BaseModel):
+    recipient: str = Field(..., min_length=3, max_length=255)
+
+
+class TestDeliveryResult(BaseModel):
+    channel: str
+    status: str
+    provider: str
+    recipient: str
+    message_id: str | None = None
+    error: str | None = None
 
 
 @router.get("", response_model=list[NotificationOut])
@@ -95,3 +108,37 @@ def get_due_delivery_queue(
     has been delivered.
     """
     return due_notifications(db, limit=limit)
+
+
+@router.post("/test/email", response_model=TestDeliveryResult)
+def test_email_delivery(
+    payload: TestDeliveryRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    actor: Optional[User] = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+):
+    """Send a real one-off SMTP test message; never reports simulated success."""
+    try:
+        from app.services.notification_delivery import send_email
+    except ImportError:
+        from backend.app.services.notification_delivery import send_email
+    result = send_email([payload.recipient], "IGL Safety Intelligence test", "SMTP test requested by an operator.")
+    log_audit_event(db, actor.id if actor else None, "EMAIL_TEST_ATTEMPTED", "NOTIFICATION_TRANSPORT", details_json={"status": result["status"]}, ip_address=request.client.host if request.client else None)
+    return {"channel": "EMAIL", "recipient": payload.recipient, **result}
+
+
+@router.post("/test/whatsapp", response_model=TestDeliveryResult)
+def test_whatsapp_delivery(
+    payload: TestDeliveryRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    actor: Optional[User] = Depends(require_role("ADMIN", "SAFETY_OFFICER")),
+):
+    """Send a real one-off WhatsApp Cloud API test message."""
+    try:
+        from app.services.notification_delivery import send_whatsapp
+    except ImportError:
+        from backend.app.services.notification_delivery import send_whatsapp
+    result = send_whatsapp(payload.recipient, "IGL Safety Intelligence test message.")
+    log_audit_event(db, actor.id if actor else None, "WHATSAPP_TEST_ATTEMPTED", "NOTIFICATION_TRANSPORT", details_json={"status": result["status"]}, ip_address=request.client.host if request.client else None)
+    return {"channel": "WHATSAPP", "recipient": payload.recipient, **result}

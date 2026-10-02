@@ -4,6 +4,8 @@
 
 `Camera/webcam/file/RTSP -> StreamReader -> bounded FrameBuffer -> UltralyticsModelAdapter -> Detection -> IoUTracker -> SafetyEventOrchestrator`
 
+Confirmed event notification policies create durable channel records. The notification delivery worker atomically claims queued EMAIL/WHATSAPP records, sends through SMTP or Meta's WhatsApp Cloud API, and records provider acceptance or a safe failure with bounded exponential retry. Other channels remain explicitly unsupported. Test sends contact the supplied real destination and create an audit record without storing the destination in the audit details.
+
 `StreamReader` accepts a configured webcam, RTSP/HTTP source, or local video path. Webcam discovery and preview reuse the same reader and bounded frame buffer; the browser preview is emitted only from observed frames. Frames are timestamped and copied into a thread-safe buffer bounded by retention time, frame count, and bytes. The adapter loads only an explicitly configured local weights file. Missing or invalid weights leave inference unavailable; no detections are substituted. Inference access is serialized across camera workers.
 
 Each `Detection` validates camera, timestamp, class, confidence, bounding box, and model metadata. Each `VisualTrack` has a generated visual-session identifier and a `DETECTED`, `TRACKED`, `TEMPORARILY_LOST`, or `ENDED` lifecycle. Track identifiers are not employee identities; identity is not inferred or attached.
@@ -14,7 +16,7 @@ Each `Detection` validates camera, timestamp, class, confidence, bounding box, a
 
 Camera-health monitoring can write `CAMERA_FAILURE` events with `observation_state=NOT_ASSESSABLE`, no confidence, and no duration; these report source availability, not a safety hazard. When an implemented detector has real model output and operator-supplied configuration, `SafetyEventOrchestrator` applies temporal policy, persists event provenance, captures evidence from the same frame, correlates persisted events, and evaluates notification/escalation policy. No safety event is produced by configuration alone.
 
-Detections and visual tracks are persisted by the orchestrator with model and frame provenance when real inference runs. Incidents, near-misses, and corrective actions refer to persisted events and move only through declared, audited state machines. This build has no authentication, so actor attribution is explicitly NULL.
+Detections and visual tracks are persisted by the orchestrator with model and frame provenance when real inference runs. Incidents, near-misses, and corrective actions refer to persisted events and move only through declared, audited state machines. In authenticated mode, short-lived JWTs resolve active user records and permission/role checks enforce declared endpoint access; anonymous development writes remain explicitly unattributed.
 
 Temporal verification and polygon membership are connected to the supported safety evaluation path. PPE rule interpretation remains a separate primitive because PPE detectors are not implemented. Generic temporal values must be marked `ENGINEERING_DEFAULT_PENDING_IGL_VALIDATION`; no IGL SOP thresholds or zone geometry are present.
 
@@ -45,7 +47,7 @@ suite never depends on a deployment's data.
 
 - **IMPLEMENTED:** Bounded frame buffering, local model adapter, detection structure, IoU track association and persistence, camera-to-pipeline wiring, continuous camera-health worker, audited event transitions, response lifecycles, migration-owned schema, and derived health semantics. Authentication/bootstrap are not implemented.
 - **PARTIALLY IMPLEMENTED:** Supported fire/smoke/restricted-zone event path is code-connected but blocked at runtime by missing weights and IGL configuration; other listed detector categories remain unavailable.
-- **PARTIALLY IMPLEMENTED:** Operator-supplied configuration APIs, event-linked evidence, in-app queue, DB-count analytics, browser dashboard and event-driven local alarm. External sender delivery and authentication are absent.
+- **IMPLEMENTED WITH LIMITS:** Operator-supplied configuration APIs, event-linked evidence, in-app queue, DB-count analytics, browser dashboard, event-driven local alarm, JWT authentication, SMTP email, and WhatsApp Cloud API delivery. Physical alarm output and other external channels remain unavailable.
 - **WEBCAM CHECK:** A previous local run records backend preview from device 0 at 640x480. In the current execution, device discovery and capture failed for device 0 and all probed indices, so that hardware result is historical and not reproduced here.
 - **NOT_CONFIGURED:** Model weights are absent; model health reports `MODEL_NOT_CONFIGURED`.
 - **NOT_VALIDATED:** No IGL layouts, cameras, SOPs, or labeled IGL data were supplied or assessed.

@@ -17,17 +17,51 @@ try:
     from app.config import settings
     from app.database import SessionLocal
     from app.models import Event, User
-    from app.services.escalation_engine import evaluate_event_escalation
+    from app.services.escalation_engine import evaluate_event_escalation, notification_targets
+    from app.services.notification_engine import enqueue_notification
 except ImportError:  # pragma: no cover
     from backend.app.config import settings
     from backend.app.database import SessionLocal
     from backend.app.models import Event, User
-    from backend.app.services.escalation_engine import evaluate_event_escalation
+    from backend.app.services.escalation_engine import evaluate_event_escalation, notification_targets
+    from backend.app.services.notification_engine import enqueue_notification
 
 
 logger = logging.getLogger("igl.safety.event_worker")
 
 OPEN_WORKFLOW_STATES = ("NEW", "UNACKNOWLEDGED", "ACKNOWLEDGED", "ASSIGNED", "UNDER_INVESTIGATION", "ACTION_REQUIRED")
+
+
+def enqueue_escalation_notifications(db: Session, event: Event, escalations: list[dict[str, Any]]) -> int:
+    """Notify each newly escalated role through its matching configured channels.
+
+    Every escalation also creates an in-app dashboard item. External transports
+    are only queued if an operator has a matching event notification policy.
+    """
+    policies = notification_targets(db, event)
+    created = 0
+    for escalation in escalations:
+        target_role = escalation["to_role"]
+        channels = {"DASHBOARD"}
+        channels.update(
+            policy.channel for policy in policies
+            if policy.recipient_role == target_role
+        )
+        for channel in sorted(channels):
+            enqueue_notification(
+                db,
+                event_id=event.id,
+                recipient_role=target_role,
+                recipient=target_role,
+                channel=channel,
+                dedup_window_seconds=0,
+                payload_summary=(
+                    f"Escalation level {escalation['escalation_level']} to {target_role}: "
+                    f"{event.event_type} ({event.severity}) remains unhandled."
+                ),
+            )
+            created += 1
+    return created
 
 
 class SafetyEventWorker:
@@ -92,6 +126,9 @@ class SafetyEventWorker:
                 if report["status"] == "ESCALATED":
                     summary["events_escalated"] += 1
                     summary["escalations_created"] += len(report["escalations_created"])
+                    summary["notifications_created"] = summary.get("notifications_created", 0) + enqueue_escalation_notifications(
+                        session, event, report["escalations_created"]
+                    )
                 elif report["status"] == "NOT_DUE":
                     summary["events_not_due"] += 1
                 elif report["status"] == "ESCALATION_NOT_CONFIGURED":

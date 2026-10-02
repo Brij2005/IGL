@@ -20,16 +20,17 @@ Status vocabulary:
 |   |-- alembic.ini
 |   |-- requirements.txt
 |   |-- app/
-|   |   |-- access_control.py        # No authentication; fail-closed switch
+|   |   |-- access_control.py        # JWT identity resolution/RBAC; dev anonymous switch
 |   |   |-- config.py                # Environment settings and non-local guard
 |   |   |-- database.py              # Migration-owned schema and head checks
 |   |   |-- main.py                  # FastAPI lifespan and workers
 |   |   |-- models.py                # SQLAlchemy domain models
 |   |   |-- api/
+|   |   |   |-- auth.py               # Password login, bearer tokens, password change
 |   |   |   |-- cameras.py           # CRUD, webcam discovery/control, MJPEG/snapshot
 |   |   |   |-- events.py             # Persisted events and workflow transitions
 |   |   |   |-- responses.py          # Acknowledgement, assignment, response lifecycles
-|   |   |   |-- identity.py           # Operator directory and audit log; no login
+|   |   |   |-- identity.py           # Operator account directory and audit log
 |   |   |   |-- safety_config.py      # Detector, thresholds, escalation/notification policies
 |   |   |   |-- escalation.py         # Escalation and correlation routes
 |   |   |   |-- evidence.py           # Event-linked evidence retrieval
@@ -47,7 +48,9 @@ Status vocabulary:
 |   |   |   |-- continuous_health.py  # Camera health polling
 |   |   |   |-- health_monitor.py     # Observed health and CAMERA_FAILURE events
 |   |   |   |-- evidence_engine.py    # Snapshot/hash/path/integrity handling
-|   |   |   |-- notification_engine.py# Queue bookkeeping; no delivery worker
+|   |   |   |-- notification_engine.py# Durable queue, deduplication, retries, status
+|   |   |   |-- notification_delivery.py # SMTP + Meta WhatsApp Cloud API transports
+|   |   |   |-- notification_worker.py # Background delivery and retry worker
 |   |   |   |-- escalation_engine.py  # Persisted-event escalation policy evaluation
 |   |   |   |-- correlation_engine.py # Correlation of persisted events
 |   |   |   |-- workflow_engine.py    # Event acknowledgement/assignment/transitions
@@ -58,7 +61,7 @@ Status vocabulary:
 |   |   |   |-- frame_buffer.py       # Bounded timestamped frame buffer
 |   |   |   |-- encrypted_url.py      # Camera URL encryption policy
 |   |   |   `-- redaction.py          # Shared source credential redaction
-|   |-- migrations/versions/          # 12 Alembic revisions; linear chain
+|   |-- migrations/versions/          # 14 Alembic revisions; linear chain
 |   `-- tests/                        # Isolated DB, API, safety, migration tests
 |-- config/igl/                       # Empty NOT_CONFIGURED templates; not auto-loaded
 |-- data/                             # Git-ignored runtime DB, logs, evidence, reports
@@ -76,8 +79,8 @@ Status vocabulary:
 
 ## Current Boundaries
 
-- Webcam discovery, start/stop, frame capture, and browser MJPEG preview were exercised on this laptop. This does not validate AI inference.
+- A prior local record reports webcam preview. The current execution's device probe did not open or enumerate a webcam, so that result was not reproduced; neither observation validates AI inference.
 - Fire/smoke presence and restricted-zone evaluation are connected only when compatible real weights, classes, and operator configuration are present.
 - PPE absence, proximity, fall, leakage, and unsafe-behavior detectors are `NOT_IMPLEMENTED`.
-- Authentication and external notification delivery are `NOT_IMPLEMENTED`; local development must remain on localhost.
+- JWT authentication and SMTP/WhatsApp Cloud API delivery are implemented. Anonymous local development must remain on localhost; physical alarm output and other external notification channels are not implemented.
 - IGL site data, SOPs, model weights, and labeled validation data are `NOT_CONFIGURED` / `NOT_VALIDATED`.

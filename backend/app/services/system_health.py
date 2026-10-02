@@ -16,12 +16,14 @@ try:
     from app.models import Camera, Plant
     from app.services.continuous_health import camera_health_worker
     from app.services.inference_pipeline import pipeline_manager
+    from app.services.notification_worker import notification_delivery_worker
 except ImportError:
     from backend.app.config import settings
     from backend.app.database import engine, get_migration_state
     from backend.app.models import Camera, Plant
     from backend.app.services.continuous_health import camera_health_worker
     from backend.app.services.inference_pipeline import pipeline_manager
+    from backend.app.services.notification_worker import notification_delivery_worker
 
 
 APPLICATION_UP = "APPLICATION_UP"
@@ -122,10 +124,11 @@ def collect_system_health() -> dict:
         "active_camera_count": active_camera_count if database_reachable else None,
         "active_pipelines": len(pipelines),
         "evidence_subsystem": evidence_state,
-        "notification_subsystem": "IN_APP_QUEUE_AVAILABLE_EXTERNAL_NOT_CONFIGURED",
-        # Reported plainly: this build has no authentication, so every endpoint
-        # is reachable without a credential unless access is restricted at the
-        # network layer.
+        "notification_subsystem": f"IN_APP_QUEUE_AVAILABLE_DELIVERY_WORKER_{notification_delivery_worker.status}",
+        "notification_delivery_worker": notification_delivery_worker.status,
+        "notification_delivery_last_error": notification_delivery_worker.last_error_type,
+        # Reports the configured authentication mode without implying that a
+        # particular request has been authenticated.
         "access_control": settings.authentication_state(),
         "frontend_connectivity": "NOT_ASSESSED",
         "validation_status": VALIDATION_NOT_VALIDATED,

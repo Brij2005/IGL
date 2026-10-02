@@ -8,8 +8,19 @@
   <script src="js/app.js?v=platform-audit-3" defer></script>
 </head>
 <body>
-  <!-- No login screen: this deployment has no authentication, so there is
-       nothing to sign in to. Restrict access at the network layer instead. -->
+  <main id="login-shell" class="login-shell" hidden>
+    <form id="login-form" class="login-card">
+      <span class="brand-mark" aria-hidden="true">IGL<span>/</span>SI</span>
+      <p class="eyebrow">SAFETY OPERATIONS CENTER</p>
+      <h1>Sign in</h1>
+      <p class="login-description">Use your configured operator account. Development may allow anonymous access.</p>
+      <label>API base<input id="login-api-base" type="url" value="http://127.0.0.1:8000/api/v1" autocomplete="url"></label>
+      <label>Username or email<input name="username_or_email" required autocomplete="username"></label>
+      <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
+      <button class="inline-button" type="submit">Sign in</button>
+      <p id="login-message" class="login-message" role="status"></p>
+    </form>
+  </main>
   <div id="app-shell" class="app-shell" hidden>
     <aside class="sidebar">
       <a class="brand" href="#overview" aria-label="IGL Safety Intelligence home">
@@ -29,7 +40,7 @@
       </nav>
       <div class="sidebar-bottom">
         <div class="igltarget"><span class="status-dot dot-amber"></span><span>IGL VALIDATION<br><strong>NOT VALIDATED</strong></span></div>
-        <div class="nav-item static-note"><span class="nav-symbol">!</span>NO AUTHENTICATION<br><strong>RESTRICT AT NETWORK</strong></div>
+        <div class="nav-item static-note"><span class="nav-symbol">!</span>ACCESS MODE<br><strong>CHECK SYSTEM STATUS</strong></div>
       </div>
     </aside>
 
@@ -45,6 +56,7 @@
           </label>
           <span class="api-state"><span class="status-dot dot-muted" id="api-dot"></span><span id="api-state-text">Checking API</span></span>
           <button class="icon-button" id="refresh-button" title="Refresh data" aria-label="Refresh data">R</button>
+          <button class="inline-button logout-button" id="logout-button" type="button" hidden>Sign out</button>
         </div>
       </header>
       <div id="global-message" class="global-message" role="status" hidden></div>

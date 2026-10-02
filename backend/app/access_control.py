@@ -1,57 +1,70 @@
-"""Request access control and audit logging for a deployment with no login.
-
-Authentication is deliberately absent from this build. There is no login
-endpoint, no password verification, no token issuance and no token validation,
-so there is no verified identity to resolve for a request.
+"""Request access control and audit logging for anonymous or JWT deployments.
 
 What is deliberately *kept* is the authorization structure:
 
-* Every endpoint still declares the permission or role it requires, so the
-  intended access model stays visible in the code and in the OpenAPI document
-  instead of being quietly deleted.
-* ``require_permission`` / ``require_role`` are the single choke point where a
-  deployment that does require authenticated access would enforce it. With
-  ``ALLOW_ANONYMOUS_ACCESS`` enabled they resolve to an anonymous actor.
+* Every endpoint declares the permission or role it requires.
+* ``require_permission`` / ``require_role`` enforce those requirements against
+  the JWT-authenticated user's role when anonymous access is disabled.
 * Every state-changing operation is still written to the audit log. With no
   verified identity the actor is recorded as NULL and the access state is
   recorded explicitly, so an audit row never attributes an action to a person
   who cannot be identified.
 
-SECURITY POSTURE: with anonymous access enabled, anybody who can reach this API
-can acknowledge events, change safety thresholds, register cameras and edit
-operator identities. Access must therefore be restricted at the network layer
-or by a reverse proxy that terminates authentication in front of this service.
+Anonymous access remains available only as a local-development mode. Shared
+deployments must disable it and configure the JWT signing secret.
 """
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+import jwt
 from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 try:
     from app.config import settings
     from app.database import get_db
     from app.models import AuditLog, User
+    from app.models import Role
 except ImportError:  # pragma: no cover - import shim for direct script use
     from backend.app.config import settings
     from backend.app.database import get_db
     from backend.app.models import AuditLog, User
+    from backend.app.models import Role
 
 
 # Recorded on every audit row so a reader can tell which access model produced it.
 ANONYMOUS_ACCESS_STATE = "NO_AUTHENTICATION_ANONYMOUS_ACCESS"
 IDENTIFIED_ACCESS_STATE = "IDENTIFIED_ACCESS"
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def resolve_actor() -> Optional[User]:
-    """Return the acting identity for a request, or ``None``.
-
-    There is no authentication in this build, so no request can prove who it is.
-    The hook is kept as a single, obvious insertion point: a deployment that
-    restores authentication implements it here and every endpoint inherits it,
-    because every endpoint already depends on this function.
-    """
-    return None
+def resolve_actor(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    """Resolve a live, active user from a signed token or local anonymous mode."""
+    if credentials is None:
+        if settings.ALLOW_ANONYMOUS_ACCESS:
+            return None
+        raise HTTPException(status_code=401, detail="Authentication required", headers={"WWW-Authenticate": "Bearer"})
+    secret = settings.AUTH_JWT_SECRET_KEY.get_secret_value() if settings.AUTH_JWT_SECRET_KEY else ""
+    try:
+        claims = jwt.decode(credentials.credentials, secret, algorithms=["HS256"], issuer=settings.AUTH_JWT_ISSUER)
+        user_id = claims.get("sub")
+        if not isinstance(user_id, str):
+            raise ValueError("invalid subject")
+    except (jwt.PyJWTError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials", headers={"WWW-Authenticate": "Bearer"}) from None
+    user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials", headers={"WWW-Authenticate": "Bearer"})
+    changed = user.password_changed_at
+    if changed and changed.tzinfo is None:
+        changed = changed.replace(tzinfo=timezone.utc)
+    if claims.get("pwd", 0) != (int(changed.timestamp() * 1_000_000) if changed else 0):
+        raise HTTPException(status_code=401, detail="Session is no longer valid", headers={"WWW-Authenticate": "Bearer"})
+    return user
 
 
 def access_state(actor: Optional[User]) -> str:
@@ -68,7 +81,13 @@ def require_permission(permission: str) -> Callable:
     """
 
     def dependency(actor: Optional[User] = Depends(resolve_actor)) -> Optional[User]:
-        _enforce_access_mode(permission)
+        if actor is None:
+            _enforce_access_mode(permission)
+            return None
+        role = actor.role
+        permissions = role.permissions_json if role and isinstance(role.permissions_json, list) else []
+        if "*" not in permissions and permission not in permissions:
+            raise HTTPException(status_code=403, detail="Insufficient permission")
         return actor
 
     dependency.declared_permission = permission  # type: ignore[attr-defined]
@@ -84,7 +103,12 @@ def require_role(*allowed_roles: str) -> Callable:
     """
 
     def dependency(actor: Optional[User] = Depends(resolve_actor)) -> Optional[User]:
-        _enforce_access_mode("/".join(allowed_roles) or "ROLE_REQUIRES_AUTHENTICATION")
+        requirement = "/".join(allowed_roles) or "ROLE_REQUIRES_AUTHENTICATION"
+        if actor is None:
+            _enforce_access_mode(requirement)
+            return None
+        if actor.role is None or actor.role.name not in allowed_roles:
+            raise HTTPException(status_code=403, detail="Insufficient role")
         return actor
 
     dependency.declared_roles = allowed_roles  # type: ignore[attr-defined]
@@ -97,8 +121,7 @@ def _enforce_access_mode(requirement: str) -> None:
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail=(
-            f"This deployment requires authenticated access, and this build has no "
-            f"authentication. Unmet requirement: {requirement}."
+            f"This deployment requires an authenticated user. Unmet requirement: {requirement}."
         ),
     )
 
