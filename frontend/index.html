@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>IGL Safety Intelligence</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <link rel="stylesheet" href="css/styles.css?v=platform-audit-3">
-  <script src="js/app.js?v=platform-audit-3" defer></script>
+  <link rel="stylesheet" href="css/styles.css?v=command-center-1">
+  <script src="js/app.js?v=command-center-1" defer></script>
 </head>
 <body>
   <main id="login-shell" class="login-shell" hidden>
@@ -32,7 +32,12 @@
       <nav id="navigation" aria-label="Primary navigation">
         <button class="nav-item active" data-view="overview" data-permission="analytics:view"><span class="nav-symbol">[]</span>Overview</button>
         <button class="nav-item" data-view="cameras" data-permission="cameras:view"><span class="nav-symbol">O</span>Cameras</button>
+        <button class="nav-item" data-view="workers" data-permission="cameras:view"><span class="nav-symbol">W</span>Workers</button>
         <button class="nav-item" data-view="events" data-permission="events:view"><span class="nav-symbol">~</span>Events</button>
+        <button class="nav-item" data-view="incidents" data-permission="events:view"><span class="nav-symbol">!</span>Incidents</button>
+        <button class="nav-item" data-view="alarm" data-permission="events:view"><span class="nav-symbol">A</span>Alarm center</button>
+        <button class="nav-item" data-view="rules" data-permission="zones:view"><span class="nav-symbol">R</span>Rules</button>
+        <button class="nav-item" data-view="notifications" data-permission="events:view"><span class="nav-symbol">N</span>Notifications</button>
         <button class="nav-item" data-view="evidence" data-permission="evidence:view"><span class="nav-symbol">#</span>Evidence</button>
         <button class="nav-item" data-view="configuration" data-roles="ADMIN,SAFETY_OFFICER,PLANT_MANAGER"><span class="nav-symbol">C</span>Configuration</button>
         <button class="nav-item" data-view="analytics" data-permission="analytics:view"><span class="nav-symbol">%</span>Analytics</button>

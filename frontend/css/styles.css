@@ -236,3 +236,46 @@ td { padding: 12px 13px; border-top: 1px solid #edf1ef; vertical-align: top; }
   .page-footer { flex-direction: column; gap: 5px; }
   .login-panel { padding: 27px 22px; }
 }
+/* Industrial command-room palette: subdued surfaces keep status colors legible. */
+:root {
+  color-scheme: dark;
+  --ink: #e5ecea;
+  --muted: #9aa9a5;
+  --soft: #202c2b;
+  --line: #354543;
+  --paper: #141d1c;
+  --white: #1d2927;
+  --pine: #9bc9bc;
+  --leaf: #b9d967;
+  --amber: #e2b35e;
+  --red: #ed8077;
+}
+body { background: var(--paper); color: var(--ink); }
+.sidebar { background: #101918; border-right: 1px solid #2a3836; }
+.main-area { background: #141d1c; }
+.topbar { border-color: var(--line); }
+.topbar h1, h2, h3 { color: var(--ink); }
+.eyebrow, .api-state, label { color: var(--muted); }
+.brand-mark { color: var(--leaf); }
+.nav-item.active { color: #14201b; }
+.metric, .section, .login-card, .login-panel { color: var(--ink); background: #1c2826; border-color: var(--line); }
+.metric-label, .metric-note, .section-head span, .page-footer { color: var(--muted); }
+.status-banner, .status-pill, .user-chip, .icon-button, input, select, textarea { color: var(--ink); background: #202d2b; border-color: var(--line); }
+input:focus, select:focus, textarea:focus { border-color: #83b9ab; box-shadow: 0 0 0 3px rgba(131,185,171,.15); }
+.table-wrap { border-color: var(--line); }
+th { color: #a7b9b4; background: #202d2b; }
+td { color: #d8e1de; border-color: #2c3a38; }
+tr:hover td { background: #222f2d; }
+.empty-state, .config-note, .section-body, .camera-card { color: #b9c7c3; background: #1c2826; }
+.alarm-clear { color: #9dd1ad; background: #1c2d25; border-color: #345240; }
+.alarm-active { color: #ffd1cc; background: #352221; border-color: #70413d; }
+.alarm-unavailable { color: #f0d7a7; background: #30291c; border-color: #69542d; }
+.alarm-banner span:not(.alarm-label), .browser-camera-note { color: #b3c1bd; }
+.global-message { color: #f0d7a7; background: #30291c; border-color: #69542d; }
+.dot-green { background: #62c28e; }
+.dot-amber { background: #e2b35e; }
+.dot-red { background: #ed8077; }
+.dot-muted { background: #778782; }
+.delivery-test-form { display: grid; grid-template-columns: minmax(150px, .6fr) minmax(200px, 1fr) auto; align-items: end; gap: 14px; }
+.delivery-test-form label { margin-top: 0; }
+@media (max-width: 620px) { .delivery-test-form { grid-template-columns: 1fr; } }

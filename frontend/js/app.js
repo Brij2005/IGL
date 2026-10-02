@@ -7,7 +7,12 @@ const ALARM_EVENT_TYPES = new Set(["FIRE", "SMOKE", "RESTRICTED_ZONE_INTRUSION"]
 const labels = {
   overview: ["OPERATIONS / CURRENT STATE", "Overview"],
   cameras: ["MONITOR / INPUTS", "Cameras"],
+  workers: ["MODEL OUTPUT / TRACK SESSIONS", "Workers"],
   events: ["REVIEW / WORKFLOW", "Events"],
+  incidents: ["RESPONSE / CASE MANAGEMENT", "Incidents"],
+  alarm: ["RESPONSE / SOFTWARE ALARM", "Alarm center"],
+  rules: ["CONFIGURATION / CAPABILITIES", "Rules"],
+  notifications: ["DELIVERY / PROVIDER STATUS", "Notifications"],
   evidence: ["REVIEW / EVENT MATERIAL", "Evidence"],
   configuration: ["OPERATOR-SUPPLIED / NO DEFAULTS", "Configuration"],
   analytics: ["RECORDS / SUMMARY", "Analytics"],
@@ -61,6 +66,11 @@ function escapeHtml(value) {
 function showMessage(message, visible = true) {
   globalMessage.textContent = message;
   globalMessage.hidden = !visible;
+}
+
+function userCan(permission) {
+  const permissions = currentIdentity?.role?.permissions_json;
+  return !currentIdentity || permissions?.includes("*") || permissions?.includes(permission);
 }
 
 async function request(path, options = {}) {
@@ -157,7 +167,7 @@ async function renderOverview() {
     </div>`;
   content.insertAdjacentHTML("beforeend", `<div class="content-grid operational-records">
     <section class="section"><div class="section-head"><h2>Recent incidents</h2><span>DATABASE RECORDS</span></div>${incidents.length ? `<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Severity</th><th>Status</th><th>Created</th></tr></thead><tbody>${incidents.map((incident) => `<tr><td>${escapeHtml(incident.title)}</td><td>${escapeHtml(incident.severity)}</td><td>${escapeHtml(incident.status)}</td><td>${escapeHtml(formatDate(incident.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No incident records.</strong>Incidents require an existing event and operator action.</div></div>`}</section>
-    <section class="section"><div class="section-head"><h2>Notification state</h2><span>PROVIDER ACCEPTANCE IS NOT READ RECEIPT</span></div><div class="section-body">${stateRows(channels.map((channel) => [channel.channel, `${channel.configuration_state} · QUEUED ${channel.queued} · SENT ${channel.sent} · FAILED ${channel.failed}`]))}</div>${notifications.length ? `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>State</th><th>Recipient</th><th>Updated</th></tr></thead><tbody>${notifications.map((item) => `<tr><td>${escapeHtml(item.channel)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.recipient_role || item.recipient || "UNASSIGNED")}</td><td>${escapeHtml(formatDate(item.sent_at || item.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No notifications queued.</strong>Event notification policies create rows when a supported event is confirmed.</div></div>`}</section>
+    <section class="section"><div class="section-head"><h2>Notification state</h2><span>PROVIDER ACCEPTANCE IS NOT READ RECEIPT</span></div><div class="section-body">${stateRows(channels.map((channel) => [channel.channel, `${channel.configuration_state} · QUEUED ${channel.queued} · SENT ${channel.sent} · FAILED ${channel.failed}`]))}</div>${notifications.length ? `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>State</th><th>Recipient</th><th>Updated</th></tr></thead><tbody>${notifications.map((item) => `<tr><td>${escapeHtml(item.channel)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(maskedRecipient(item.recipient_role || item.recipient))}</td><td>${escapeHtml(formatDate(item.sent_at || item.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No notifications queued.</strong>Event notification policies create rows when a supported event is confirmed.</div></div>`}</section>
   </div>`);
   setApiIndicator(health.overall_status, health.overall_status);
 }
@@ -296,8 +306,7 @@ async function refreshWebcamPreview() {
 }
 
 function canViewBackendPreview() {
-  const permissions = currentIdentity?.role?.permissions_json;
-  return !currentIdentity || permissions?.includes("*") || permissions?.includes("cameras:view_live");
+  return userCan("cameras:view_live");
 }
 
 function discoveredLaptopDevice() {
@@ -537,6 +546,60 @@ async function applyTransition(eventId, newState) {
   }
 }
 
+function maskedRecipient(value) {
+  if (!value) return "UNASSIGNED";
+  const text = String(value);
+  const at = text.indexOf("@");
+  if (at > 0) return `${text[0]}***${text.slice(at)}`;
+  return `${text.slice(0, 3)}***${text.slice(-2)}`;
+}
+
+async function renderWorkers() {
+  content.innerHTML = `<section class="section"><div class="section-head"><h2>Live worker monitoring</h2><span>TRACK IDS ARE VISUAL SESSIONS, NOT IDENTITIES</span></div><div class="empty-state"><div><strong>WORKER TRACKS NOT EXPOSED BY CURRENT API</strong>The database has track records, but there is no authorized live tracks endpoint. Helmet and phone-use results are UNKNOWN; no workers or safety states are inferred here.</div></div></section>
+    <section class="section"><div class="section-head"><h2>Detector capability</h2><span>BACKEND MODEL HEALTH</span></div><div class="section-body" id="worker-capability">Loading model capability…</div></section>`;
+  try {
+    const health = await request("/system/ai-health"); const model = health.model || {};
+    document.querySelector("#worker-capability").innerHTML = stateRows([["Model", model.status || "UNKNOWN"], ["Weights", model.weights_loaded ? "LOADED" : "MODEL_NOT_CONFIGURED"], ["Supported classes", (model.classes || []).join(", ") || "NOT_AVAILABLE"], ["Phone-use capability", "NOT_CONFIGURED"]]);
+  } catch (error) { document.querySelector("#worker-capability").textContent = error.message; }
+}
+
+async function renderIncidents() {
+  const incidents = await request("/incidents?limit=200&offset=0");
+  const rows = incidents.map((item) => `<tr><td class="mono">${escapeHtml(item.id.slice(0, 12))}</td><td>${escapeHtml(item.title || "UNTITLED")}</td><td>${escapeHtml(item.severity || "UNKNOWN")}</td><td>${escapeHtml(item.status || "UNKNOWN")}</td><td class="mono">${escapeHtml(item.event_id || "UNLINKED")}</td><td>${escapeHtml(formatDate(item.created_at))}</td></tr>`).join("");
+  content.innerHTML = `<section class="section"><div class="section-head"><h2>Persisted incidents</h2><span>BACKEND RECORDS · ${incidents.length}</span></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Title</th><th>Severity</th><th>Status</th><th>Event</th><th>Created</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No incidents recorded.</strong>Incidents are created only against persisted events.</div></div>`}</section>`;
+}
+
+async function renderAlarmCenter() {
+  const [events, health] = await Promise.all([request("/events?limit=200&offset=0"), request("/system/health")]);
+  const confirmed = events.filter((event) => ALARM_EVENT_TYPES.has(event.event_type) && event.observation_state === "CONFIRMED");
+  const rows = confirmed.map((event) => `<tr><td>${escapeHtml(event.event_type)}</td><td>${escapeHtml(event.severity)}</td><td>${escapeHtml(event.workflow_state)}</td><td>${escapeHtml(event.camera_id)}</td><td>${escapeHtml(event.track_uuid || "UNKNOWN")}</td><td>${escapeHtml(formatDate(event.started_at))}</td></tr>`).join("");
+  content.innerHTML = `<div class="status-banner"><div><strong>SOFTWARE ALARM · ${confirmed.length ? "CONFIRMED EVENTS PRESENT" : "NO CONFIRMED EVENTS"}</strong><span>Physical output: ${escapeHtml(health.physical_alarm_state || "PHYSICAL_ALARM_NOT_CONFIGURED")}. Browser sound requires operator interaction and browser audio permission.</span></div><span class="status-pill">${escapeHtml(health.validation_status || "NOT_VALIDATED")}</span></div><section class="section"><div class="section-head"><h2>Confirmed alarm eligible events</h2><span>EVENT API</span></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Rule</th><th>Severity</th><th>Workflow</th><th>Camera</th><th>Track</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No confirmed alarm events.</strong>Unconfirmed observations are not shown as alarms.</div></div>`}</section>`;
+}
+
+async function renderRules() {
+  const [ppe, detectors, rules, thresholds, escalation, policies, capability] = await Promise.all([
+    request("/configuration/ppe-rules"), request("/configuration/detector-configs"), request("/configuration/safety-rules"),
+    request("/configuration/operating-thresholds"), request("/configuration/escalation-policies"), request("/configuration/notification-policies"), request("/system/ai-health"),
+  ]);
+  const model = capability.model || {};
+  const rows = [...ppe.map((x) => ({ type: `PPE · ${x.ppe_type}`, enabled: x.is_mandatory ? "MANDATORY" : "CONFIGURED", scope: x.zone_id, capability: model.weights_loaded ? "MODEL AVAILABLE · RULE NOT VALIDATED" : "MODEL_NOT_CONFIGURED" })), ...detectors.map((x) => ({ type: x.detector_key, enabled: x.is_enabled ? "ENABLED" : "DISABLED", scope: x.camera_id || x.zone_id || "GLOBAL", capability: model.weights_loaded ? x.validation_status : "MODEL_NOT_CONFIGURED" })), ...rules.map((x) => ({ type: `${x.code} · ${x.name}`, enabled: x.is_active ? "ENABLED" : "DISABLED", scope: x.zone_id || "GLOBAL", capability: x.validation_status }))];
+  const body = rows.map((x) => `<tr><td>${escapeHtml(x.type)}</td><td>${escapeHtml(x.enabled)}</td><td>${escapeHtml(x.scope)}</td><td>${escapeHtml(x.capability)}</td></tr>`).join("");
+  content.innerHTML = `<section class="section"><div class="section-head"><h2>Configured rules</h2><span>NO MODEL OUTPUT IS IMPLIED</span></div>${body ? `<div class="table-wrap"><table><thead><tr><th>Rule</th><th>Configuration</th><th>Scope</th><th>Capability / validation</th></tr></thead><tbody>${body}</tbody></table></div>` : `<div class="empty-state"><div><strong>No rules configured.</strong>Rules appear when returned by configuration APIs.</div></div>`}</section><div class="metrics-grid">${metric("Operating thresholds", thresholds.length)}${metric("Escalation policies", escalation.length)}${metric("Notification policies", policies.length)}${metric("Phone detection", "NOT_CONFIGURED", "No supported result available")}</div>`;
+}
+
+async function renderNotifications() {
+  const [items, channels] = await Promise.all([request("/notifications?limit=200&offset=0"), request("/notifications/channels/status")]);
+  const rows = items.map((x) => `<tr><td class="mono">${escapeHtml((x.event_id || x.id).slice(0, 12))}</td><td>${escapeHtml(x.channel)}</td><td>${escapeHtml(maskedRecipient(x.recipient || x.recipient_role))}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.retry_count)} / ${escapeHtml(x.max_attempts)}</td><td>${escapeHtml(formatDate(x.last_attempt_at || x.created_at))}</td><td>${escapeHtml(x.error_message || x.provider || "—")}</td></tr>`).join("");
+  const canTest = ["ADMIN", "SAFETY_OFFICER"].includes(currentIdentity?.role?.name);
+  content.innerHTML = `<section class="section"><div class="section-head"><h2>Provider configuration</h2><span>SECRETS REMAIN ON BACKEND</span></div><div class="section-body">${stateRows(channels.map((x) => [x.channel, `${x.configuration_state} · queued ${x.queued} · sent ${x.sent} · failed ${x.failed}`]))}<p class="config-note">SMTP and WhatsApp Cloud API credentials are read from backend environment configuration. This page never accepts or stores provider secrets.</p></div></section>${canTest ? `<section class="section"><div class="section-head"><h2>Send an explicit provider test</h2><span>REAL DELIVERY ATTEMPT WHEN SUBMITTED</span></div><div class="section-body"><form id="delivery-test-form" class="delivery-test-form"><label>Channel<select name="channel"><option value="email">Email</option><option value="whatsapp">WhatsApp</option></select></label><label>Recipient<input name="recipient" required maxlength="255" autocomplete="off"></label><button class="inline-button" type="submit">Send test</button></form><p id="delivery-test-result" role="status"></p></div></section>` : ""}<section class="section"><div class="section-head"><h2>Delivery records</h2><span>PROVIDER ACCEPTANCE DOES NOT CONFIRM HUMAN RECEIPT</span></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Event</th><th>Channel</th><th>Recipient</th><th>State</th><th>Retries</th><th>Last attempt</th><th>Provider / error</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty-state"><div><strong>No delivery records.</strong>No notification rows were returned.</div></div>`}</section>`;
+  document.querySelector("#delivery-test-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget); const output = document.querySelector("#delivery-test-result");
+    output.textContent = "Sending request to backend…";
+    try { const channel = form.get("channel"); const result = await request(`/notifications/test/${channel}`, { method: "POST", body: JSON.stringify({ recipient: form.get("recipient") }) }); output.textContent = `${result.status} · ${result.provider}${result.message_id ? ` · ${result.message_id}` : ""}${result.error ? ` · ${result.error}` : ""}`; }
+    catch (error) { output.textContent = error.message; }
+  });
+}
+
 function renderAlarmState(events, error = null) {
   const region = document.querySelector("#alarm-region");
   if (!region) return;
@@ -558,7 +621,7 @@ function renderAlarmState(events, error = null) {
 
   region.innerHTML = `<div class="alarm-banner alarm-active" role="alert">
     <div class="alarm-summary"><span class="alarm-label">ACTIVE SAFETY ALARM</span><strong>${activeAlarmEvents.length} CONFIRMED EVENT${activeAlarmEvents.length === 1 ? "" : "S"} AWAITING ACKNOWLEDGEMENT</strong></div>
-    <div class="alarm-event-list">${activeAlarmEvents.map((event) => `<div class="alarm-event-row"><span><strong>${escapeHtml(event.event_type)}</strong><span>${escapeHtml(event.severity)} · ${escapeHtml(formatDate(event.started_at))}</span></span><button class="alarm-ack-button" data-alarm-ack="${escapeHtml(event.id)}" type="button">Acknowledge</button></div>`).join("")}</div>
+    <div class="alarm-event-list">${activeAlarmEvents.map((event) => `<div class="alarm-event-row"><span><strong>${escapeHtml(event.event_type)}</strong><span>${escapeHtml(event.severity)} · ${escapeHtml(formatDate(event.started_at))}</span></span>${userCan("events:acknowledge") ? `<button class="alarm-ack-button" data-alarm-ack="${escapeHtml(event.id)}" type="button">Acknowledge</button>` : `<span class="status-pill">ACKNOWLEDGEMENT PERMISSION REQUIRED</span>`}</div>`).join("")}</div>
     <p class="browser-camera-note">Browser audio only · no physical relay or siren is configured.</p>
     <button class="alarm-sound-button" id="alarm-sound-toggle" type="button" aria-pressed="${alarmSoundEnabled}">${alarmSoundEnabled ? "Disable browser sound" : "Enable browser sound"}</button>
   </div>`;
@@ -933,7 +996,7 @@ async function renderAudit() {
   content.innerHTML = `<section class="section"><div class="section-head"><h2>Audit activity</h2><span>LAST 100 RECORDS</span></div>${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Resource</th><th>Actor</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHtml(formatDate(row.timestamp))}</td><td>${escapeHtml(row.action)}</td><td>${escapeHtml(row.resource_type)} ${escapeHtml(row.resource_id || "")}</td><td>${escapeHtml(row.user_id || "SYSTEM")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><div><strong>No audit records available.</strong></div></div>`}</section>`;
 }
 
-const renderers = { overview: renderOverview, cameras: renderCameras, events: renderEvents, evidence: renderEvidence, configuration: renderConfiguration, analytics: renderAnalytics, system: renderSystem, audit: renderAudit, unavailable: async () => { content.innerHTML = unavailableMarkup(); } };
+const renderers = { overview: renderOverview, cameras: renderCameras, workers: renderWorkers, events: renderEvents, incidents: renderIncidents, alarm: renderAlarmCenter, rules: renderRules, notifications: renderNotifications, evidence: renderEvidence, configuration: renderConfiguration, analytics: renderAnalytics, system: renderSystem, audit: renderAudit, unavailable: async () => { content.innerHTML = unavailableMarkup(); } };
 
 async function navigate(view) {
   if (view !== "cameras") stopBrowserCamera();
@@ -964,8 +1027,7 @@ function setApiIndicator(status, text) {
 
 function applyNavigationPermissions() {
   document.querySelectorAll("#navigation [data-view]").forEach((button) => {
-    const permissions = currentIdentity?.role?.permissions_json;
-    const allowedByPermission = !currentIdentity || permissions?.includes("*") || permissions?.includes(button.dataset.permission);
+    const allowedByPermission = userCan(button.dataset.permission);
     const roles = button.dataset.roles?.split(",") || [];
     const allowedByRole = !roles.length || roles.includes(currentIdentity?.role?.name);
     button.hidden = !(allowedByPermission && allowedByRole);
