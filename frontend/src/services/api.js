@@ -1,4 +1,4 @@
-const API_BASE = "http://127.0.0.1:8000/api";
+const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000/api").replace(/\/+$/, "");
 
 export async function fetchStats() {
   try {
@@ -405,16 +405,28 @@ export async function fetchRegisteredPersonnelApi() {
 }
 
 export async function createRegisteredPersonnelApi(personData) {
-  try {
-    const res = await fetch(`${API_BASE}/registered-personnel`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(personData)
-    });
-    return await res.json();
-  } catch (err) {
-    return null;
+  const res = await fetch(`${API_BASE}/registered-personnel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(personData)
+  });
+  const result = await res.json();
+  if (!res.ok) {
+    const detail = result.detail;
+    const message = Array.isArray(detail)
+      ? detail.map((issue) => {
+        const location = Array.isArray(issue.loc)
+          ? issue.loc.filter((part) => part !== "body").join(".")
+          : "";
+        const reason = issue.msg || "Invalid value";
+        return location ? `${location}: ${reason}` : reason;
+      }).join("; ")
+      : typeof detail === "string"
+        ? detail
+        : "Failed to save registered personnel.";
+    throw new Error(message);
   }
+  return result;
 }
 
 export async function updateRegisteredPersonnelApi(personId, personData) {
@@ -440,4 +452,3 @@ export async function deleteRegisteredPersonnelApi(personId) {
     return null;
   }
 }
-

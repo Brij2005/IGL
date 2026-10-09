@@ -6,11 +6,11 @@
 import * as tf from "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
 import {
-  loadYOLO26Model,
-  detectYOLO26Phone,
-  getYOLO26Status,
-  MODEL_NAME as YOLO26_MODEL_NAME
-} from "./yolo26PhoneProcessor";
+  detectPhoneWithBackend,
+  getPhoneDetectionBackendStatus,
+  MODEL_NAME as PHONE_DETECTOR_MODEL_NAME
+} from "./phoneDetectionProcessor";
+import { captureFaceDescriptor, matchRegisteredFace, getFaceRecognitionStatus } from "./faceRecognition";
 
 // ============================================================================
 // PART 1: Global AI Model & State Handles (COCO-SSD & Dedicated Helmet ML Model)
@@ -36,10 +36,9 @@ let helmetModelErrorMessage = "";
 
 // Track ID Generator & Track Memory Across Frames
 let nextTrackId = 101;
-let activeTracks = []; // [{ trackId, box: [x,y,w,h], center: [cx, cy], lastSeen: timestamp }]
-
-// Phone Misuse Persistent Verification State Map across frames
-const phoneMisuseState = new Map();
+const TRACK_SESSION_ID = Math.random().toString(36).slice(2, 8).toUpperCase();
+let activeTracks = []; // [{ trackId, box: [x, y, w, h], center: [cx, cy], lastSeen: timestamp }]
+const TRACK_RETENTION_MS = 8000;
 
 // PART 4: Per-Person Helmet Verification Tracking State Map
 // key: trackId -> {
@@ -51,6 +50,7 @@ const phoneMisuseState = new Map();
 //   reason: string
 // }
 const helmetVerificationState = new Map();
+let faceRecognitionFailureReported = false;
 
 // Siren Web Audio API Synthesizer Handle
 let sirenAudioContext = null;
@@ -189,7 +189,7 @@ export async function loadHelmetDetectionModel(modelUrl = HELMET_MODEL_URL) {
       return { success: true, model: helmetModel };
     } catch (err) {
       helmetModelStatus = "ERROR";
-      helmetModelErrorMessage = `HELMET MODEL UNAVAILABLE: Trained ML helmet model files not found at ${modelUrl}. Conservative safety mode active (Default hasHelmet = false).`;
+      helmetModelErrorMessage = `HELMET MODEL UNAVAILABLE: Trained ML helmet model files not found at ${modelUrl}. Helmet status cannot be verified.`;
       return { success: false, error: helmetModelErrorMessage };
     }
   })();
@@ -217,18 +217,15 @@ export function getHelmetModelStatus() {
  * PART 3: Runs Dedicated ML Inference on Person's Head/Upper-Body Crop.
  * 
  * STRICT CONSERVATIVE SAFETY RULE:
- * If the dedicated helmet model is uninitialized, loading fails, tensor processing errors,
- * or prediction score < HELMET_CONFIDENCE_THRESHOLD (0.65), it strictly returns
- * 'hasHelmet: false' with a clear diagnostic reason.
- * 
- * NEVER assumes hasHelmet = true!
+ * Returns null for hasHelmet when inference cannot verify the PPE state.
+ * A confirmed missing helmet is reported only when an available model scores below threshold.
  */
 export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config = {}) {
   const threshold = config.helmetThreshold || HELMET_CONFIDENCE_THRESHOLD;
 
   if (!videoOrCanvas || !personNormBox || personNormBox.length < 4) {
     return {
-      hasHelmet: false,
+      hasHelmet: null,
       confidence: 0.0,
       reason: "Helmet verification unavailable (Invalid video/canvas or bounding box)",
       modelStatus: helmetModelStatus,
@@ -237,11 +234,21 @@ export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config
   }
 
   // Ensure helmet model is loaded
+  if (helmetModelStatus === "ERROR") {
+    return {
+      hasHelmet: null,
+      confidence: 0.0,
+      reason: helmetModelErrorMessage || "Helmet model unavailable; status cannot be verified.",
+      modelStatus: helmetModelStatus,
+      diagnostics: { rawScore: 0 }
+    };
+  }
+
   if (helmetModelStatus !== "READY") {
     const loadRes = await loadHelmetDetectionModel();
     if (!loadRes.success || !helmetModel) {
       return {
-        hasHelmet: false,
+        hasHelmet: null,
         confidence: 0.0,
         reason: "Helmet verification unavailable (Trained ML helmet model files not supplied at /models/helmet/model.json)",
         modelStatus: helmetModelStatus,
@@ -258,7 +265,7 @@ export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config
 
     if (width === 0 || height === 0) {
       return {
-        hasHelmet: false,
+        hasHelmet: null,
         confidence: 0.0,
         reason: "Helmet verification unavailable (Zero video dimensions)",
         modelStatus: helmetModelStatus,
@@ -274,7 +281,7 @@ export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config
 
     if (bw < 10 || bh < 10) {
       return {
-        hasHelmet: false,
+        hasHelmet: null,
         confidence: 0.0,
         reason: "Helmet verification unavailable (Head crop too small)",
         modelStatus: helmetModelStatus,
@@ -329,7 +336,7 @@ export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config
   } catch (err) {
     console.error("Helmet ML Inference Error:", err);
     return {
-      hasHelmet: false,
+      hasHelmet: null,
       confidence: 0.0,
       reason: `Helmet verification unavailable (${err.message})`,
       modelStatus: helmetModelStatus,
@@ -355,11 +362,11 @@ export async function detectHelmetForPerson(videoOrCanvas, personNormBox, config
  * Delegates directly to ML-based `detectHelmetForPerson()`.
  */
 export function inspectHelmetAndPersonsInCanvas(canvas, box) {
-  // Conservative baseline: Never assume hasHelmet = true by default
+  // This compatibility API has no model inference, so PPE status is unknown.
   return {
-    hasHelmet: false,
+    hasHelmet: null,
     confidence: 0.0,
-    reason: "Helmet verification requires ML model. (Default hasHelmet = false)",
+    reason: "Helmet verification requires a trained ML model.",
     diagnostics: { colorRatio: 0, upperRegionRatio: 0, spatialScore: 0 }
   };
 }
@@ -839,24 +846,17 @@ export function detectPipeLeakage(sourceElem, options = {}) {
 
 /**
  * PART 5: Main Real-Time Frame Inference & Tracking Engine
- * Runs TensorFlow COCO-SSD for Person Detection + Dedicated YOLO26 Phone-in-Hand Detector + ML Helmet Inspection.
+ * Runs TensorFlow COCO-SSD for person detection + backend YOLOv8 COCO phone detection + helmet inspection.
  * 
  * Final Flow:
- * Camera/Upload -> YOLO26 Phone Detection -> Person Association -> Temporal Verification -> Potential Mobile Use -> Evidence -> Alert/WhatsApp
+ * Camera/Upload -> YOLOv8 COCO phone detection -> optional spatial association; phone use is not classified.
  */
 export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
   const minConfidence = config.minConfidence || 0.35;
   const phoneThreshold = config.phoneThreshold !== undefined ? config.phoneThreshold : 0.15;
-  const phonePersistenceFrames = config.phonePersistenceFrames || 1;
-  const phoneMissGraceFrames = config.phoneMissGraceFrames || 5;
   const phoneAssociationDistance = config.phoneAssociationDistance || 0.65;
-  const minDurationSec = config.minDurationSec || 2.0;
-  const maxWarnings = config.maxWarnings || 3;
-  const warningIntervalSec = config.warningIntervalSec || 2.5;
 
-  // Ensure YOLO26 Phone Detector Model is loaded (Requirements 1, 9, 10)
-  await loadYOLO26Model();
-  const yoloStatus = getYOLO26Status();
+  let yoloStatus = getPhoneDetectionBackendStatus();
 
   if (!videoOrCanvas) {
     return {
@@ -864,7 +864,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       modelStatus: modelStatus === "READY" ? "READY" : "NO LIVE INPUT AVAILABLE",
       phoneDetectorStatus: yoloStatus.statusText,
       phoneDetectorIsActive: yoloStatus.isActive,
-      phoneDetectorModelName: YOLO26_MODEL_NAME,
+      phoneDetectorModelName: PHONE_DETECTOR_MODEL_NAME,
       personCount: 0,
       persons: [],
       phones: [],
@@ -885,7 +885,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         modelErrorMessage,
         phoneDetectorStatus: yoloStatus.statusText,
         phoneDetectorIsActive: yoloStatus.isActive,
-        phoneDetectorModelName: YOLO26_MODEL_NAME,
+        phoneDetectorModelName: PHONE_DETECTOR_MODEL_NAME,
         personCount: 0,
         persons: [],
         phones: [],
@@ -907,7 +907,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         modelStatus: "NOT ASSESSABLE",
         phoneDetectorStatus: yoloStatus.statusText,
         phoneDetectorIsActive: yoloStatus.isActive,
-        phoneDetectorModelName: YOLO26_MODEL_NAME,
+        phoneDetectorModelName: PHONE_DETECTOR_MODEL_NAME,
         personCount: 0,
         persons: [],
         phones: [],
@@ -924,9 +924,9 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       (p) => p.class === "person" && p.score >= minConfidence
     );
 
-    // 2. Run Dedicated YOLO26 Phone-in-Hand Detector (Requirements 1, 3, 4, 8, 9, 10, 13)
-    // DO NOT USE COCO-SSD FOR PHONE DETECTION!
-    const yoloPhoneRes = await detectYOLO26Phone(videoOrCanvas, { phoneThreshold });
+    // COCO-SSD is used for person detection only; phone detections come from backend YOLOv8 COCO.
+    const yoloPhoneRes = await detectPhoneWithBackend(videoOrCanvas, { phoneThreshold });
+    yoloStatus = getPhoneDetectionBackendStatus();
 
     const yoloPhoneDetections = yoloPhoneRes.phones || [];
 
@@ -943,23 +943,24 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       }))
     ];
 
-    // Check YOLO26 Phone Detector Status
+    // Do not report the phone detector as active unless the backend completed inference.
     if (!yoloPhoneRes.success || !yoloStatus.isActive) {
-      console.warn("⚠️ [YOLO26] Phone Detector Offline. Displaying 'Phone Detector Offline' (No COCO-SSD fallback).");
+      console.warn("Phone detector backend is offline; no fallback detections will be generated.");
     }
 
     // STRICT RULE: If 0 persons detected by AI, count is strictly 0
     if (personDetections.length === 0) {
-      activeTracks = [];
-      phoneMisuseState.clear();
+      const now = Date.now();
+      activeTracks = activeTracks.filter((track) => now - track.lastSeen <= TRACK_RETENTION_MS);
       stopSirenAlarm();
 
       return {
         isModelLoaded: true,
         modelStatus: "READY",
+        faceRecognitionStatus: getFaceRecognitionStatus(),
         phoneDetectorStatus: yoloStatus.statusText,
         phoneDetectorIsActive: yoloStatus.isActive,
-        phoneDetectorModelName: YOLO26_MODEL_NAME,
+        phoneDetectorModelName: PHONE_DETECTOR_MODEL_NAME,
         personCount: 0,
         persons: [],
         phones: yoloPhoneDetections.map((p) => ({
@@ -975,7 +976,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
           class: p.class,
           score: p.confidence,
           status: "UNASSOCIATED",
-          reason: `Real phone detected on desk/surface by YOLO26 (${p.class})`
+          reason: `Phone detected by backend YOLOv8 COCO (${p.class})`
         })),
         phoneMisuseEvent: null
       };
@@ -984,27 +985,53 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
     // 3. Multi-Person Tracking Across Frames
     const now = Date.now();
     const updatedPersons = [];
-
-    for (let det of personDetections) {
-      const normBox = [
+    const normalizedDetections = personDetections.map((det) => {
+      const box = [
         Math.max(0, det.bbox[0] / width),
         Math.max(0, det.bbox[1] / height),
         Math.min(1, det.bbox[2] / width),
         Math.min(1, det.bbox[3] / height)
       ];
+      return {
+        det,
+        box,
+        center: [box[0] + box[2] / 2, box[1] + box[3] / 2]
+      };
+    });
 
-      const center = [normBox[0] + normBox[2] / 2, normBox[1] + normBox[3] / 2];
+    const availableTracks = activeTracks.filter(
+      (track) => now - track.lastSeen <= TRACK_RETENTION_MS
+    );
+    const trackCandidates = [];
+    normalizedDetections.forEach(({ box, center }, detectionIndex) => {
+      availableTracks.forEach((track) => {
+        const distance = Math.hypot(track.center[0] - center[0], track.center[1] - center[1]);
+        const overlap = calculateIoU(track.box, box);
+        const maxDistance = Math.min(0.24, Math.max(0.12, Math.sqrt(box[2] * box[3]) * 0.8));
 
-      let matchedTrack = null;
-      let minDistance = 0.25;
-
-      activeTracks.forEach((tr) => {
-        const d = Math.sqrt(Math.pow(tr.center[0] - center[0], 2) + Math.pow(tr.center[1] - center[1], 2));
-        if (d < minDistance) {
-          minDistance = d;
-          matchedTrack = tr;
+        if (overlap >= 0.05 || distance <= maxDistance) {
+          trackCandidates.push({
+            detectionIndex,
+            track,
+            score: distance - overlap * 0.2 + (now - track.lastSeen) / TRACK_RETENTION_MS * 0.03
+          });
         }
       });
+    });
+
+    trackCandidates.sort((a, b) => a.score - b.score);
+    const trackByDetection = new Map();
+    const assignedTrackIds = new Set();
+    trackCandidates.forEach(({ detectionIndex, track }) => {
+      if (!trackByDetection.has(detectionIndex) && !assignedTrackIds.has(track.trackId)) {
+        trackByDetection.set(detectionIndex, track);
+        assignedTrackIds.add(track.trackId);
+      }
+    });
+    const currentTracks = [];
+
+    for (const [detectionIndex, { det, box: normBox, center }] of normalizedDetections.entries()) {
+      const matchedTrack = trackByDetection.get(detectionIndex);
 
       let trackId;
       if (matchedTrack) {
@@ -1012,16 +1039,49 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         matchedTrack.box = normBox;
         matchedTrack.center = center;
         matchedTrack.lastSeen = now;
+        currentTracks.push(matchedTrack);
       } else {
-        trackId = `TRK-P${nextTrackId++}`;
-        const newTrack = { trackId, box: normBox, center, lastSeen: now };
-        activeTracks.push(newTrack);
+        trackId = `TRK-${TRACK_SESSION_ID}-${nextTrackId++}`;
+        const newTrack = {
+          trackId,
+          box: normBox,
+          center,
+          lastSeen: now,
+          faceCheckedAt: 0,
+          matchedPersonnelId: null,
+          faceMatchDistance: null
+        };
+        currentTracks.push(newTrack);
+      }
+
+      const registeredWithFaces = (config.registeredPersonnel || []).filter(
+        (person) => Array.isArray(person.face_descriptors) && person.face_descriptors.length > 0
+      );
+      const currentTrack = currentTracks[currentTracks.length - 1];
+      if (
+        registeredWithFaces.length > 0
+        && getFaceRecognitionStatus().status !== "ERROR"
+        && now - (currentTrack.faceCheckedAt || 0) >= 1000
+      ) {
+        currentTrack.faceCheckedAt = now;
+        try {
+          const faceDescriptor = await captureFaceDescriptor(videoOrCanvas, normBox);
+          const faceMatch = matchRegisteredFace(faceDescriptor, registeredWithFaces);
+          currentTrack.matchedPersonnelId = faceMatch?.personnelId || null;
+          currentTrack.faceMatchDistance = faceMatch?.distance ?? null;
+        } catch (error) {
+          const faceStatus = getFaceRecognitionStatus();
+          if (faceStatus.status === "ERROR" && !faceRecognitionFailureReported) {
+            console.error(faceStatus.error || error.message);
+            faceRecognitionFailureReported = true;
+          }
+        }
       }
 
       // Helmet check
       if (!helmetVerificationState.has(trackId)) {
         helmetVerificationState.set(trackId, {
-          hasHelmet: false,
+          hasHelmet: null,
           confidence: 0,
           persistenceCount: 0,
           missGraceCount: HELMET_MISS_GRACE_FRAMES,
@@ -1033,12 +1093,18 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       const hState = helmetVerificationState.get(trackId);
       const mlHelmetRes = await detectHelmetForPerson(videoOrCanvas, normBox, config);
 
-      if (mlHelmetRes.hasHelmet) {
+      if (mlHelmetRes.hasHelmet === null) {
+        hState.hasHelmet = null;
+        hState.confidence = 0;
+        hState.persistenceCount = 0;
+        hState.reason = mlHelmetRes.reason;
+      } else if (mlHelmetRes.hasHelmet) {
         hState.persistenceCount += 1;
         hState.missGraceCount = HELMET_MISS_GRACE_FRAMES;
         hState.lastSeen = now;
         hState.confidence = mlHelmetRes.confidence;
         hState.reason = mlHelmetRes.reason;
+        hState.hasHelmet = true;
       } else {
         if (hState.persistenceCount >= HELMET_PERSISTENCE_FRAMES && hState.missGraceCount > 0) {
           hState.missGraceCount -= 1;
@@ -1047,32 +1113,40 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
           hState.persistenceCount = 0;
           hState.confidence = mlHelmetRes.confidence;
           hState.reason = mlHelmetRes.reason;
+          hState.hasHelmet = false;
         }
       }
 
-      const verifiedHelmet = hState.persistenceCount >= HELMET_PERSISTENCE_FRAMES && hState.missGraceCount > 0;
+      const verifiedHelmet = mlHelmetRes.hasHelmet === null
+        ? null
+        : hState.persistenceCount >= HELMET_PERSISTENCE_FRAMES && hState.missGraceCount > 0;
+      hState.hasHelmet = verifiedHelmet;
 
       updatedPersons.push({
         trackId: trackId,
         id: trackId,
+        matchedPersonnelId: currentTrack.matchedPersonnelId,
+        faceMatchDistance: currentTrack.faceMatchDistance,
         box: normBox,
         confidence: Math.round(det.score * 100) / 100,
         hasHelmet: verifiedHelmet,
         helmetConfidence: hState.confidence,
         helmetReason: hState.reason,
-        label: verifiedHelmet
-          ? `${trackId} | Helmet OK (${Math.round(hState.confidence * 100)}%)`
-          : `${trackId} | NO HELMET`,
-        color: verifiedHelmet ? "#10b981" : "#ef4444",
+        label: verifiedHelmet === null
+          ? `${trackId} | Helmet status unavailable`
+          : verifiedHelmet
+            ? `${trackId} | Helmet OK (${Math.round(hState.confidence * 100)}%)`
+            : `${trackId} | NO HELMET`,
+        color: verifiedHelmet === null ? "#94a3b8" : verifiedHelmet ? "#10b981" : "#ef4444",
         isUsingPhone: false,
         associatedPhone: null
       });
     }
 
-    activeTracks = activeTracks.filter((tr) => now - tr.lastSeen < 3000);
+    const retainedTracks = availableTracks.filter((track) => !assignedTrackIds.has(track.trackId));
+    activeTracks = [...currentTracks, ...retainedTracks];
 
-    // 4. Person-Phone Spatial Association (Requirements 3 & 5)
-    // Associate YOLO26 detected phone (in hand, near ear/face, or desk) with nearest person upper body / hand ROI
+    // 4. Associate detected phones with nearby people; this does not classify hand, ear, or desk use.
     const validPhoneCandidates = [];
     const normalizedPhones = [];
     const candidatePairings = [];
@@ -1087,7 +1161,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
           class: phoneDet.class,
           score: Math.round(score * 100) / 100,
           status: "REJECTED",
-          reason: `YOLO26 Confidence (${Math.round(score * 100)}%) below threshold (${Math.round(phoneThreshold * 100)}%)`
+          reason: `YOLOv8 confidence (${Math.round(score * 100)}%) below threshold (${Math.round(phoneThreshold * 100)}%)`
         });
         return;
       }
@@ -1130,20 +1204,11 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
       });
 
       if (!foundAssociation) {
-        // Unassociated phone on desk / table or surface (shows bounding box + class + confidence on screen, but not triggering person misuse)
-        normalizedPhones.push({
-          box: pNormBox,
-          confidence: Math.round(score * 100) / 100,
-          class: phoneDet.class,
-          situation: phoneDet.situation,
-          associatedTrackId: null
-        });
-
         validPhoneCandidates.push({
           class: phoneDet.class,
           score: Math.round(score * 100) / 100,
-          status: "ACCEPTED_UNASSOCIATED",
-          reason: `ACCEPTED: Phone detected on desk/surface by YOLO26 (${phoneDet.class})`
+          status: "UNASSOCIATED",
+          reason: "Phone detected, but no nearby person was identified; usage context is unknown."
         });
       }
     });
@@ -1159,7 +1224,7 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         assignedPersonIndices.add(pair.personIdx);
 
         const targetPerson = updatedPersons[pair.personIdx];
-        targetPerson.hasPhoneCandidateThisFrame = true;
+        targetPerson.isUsingPhone = true;
         targetPerson.associatedPhone = {
           box: pair.pNormBox,
           confidence: Math.round(pair.phoneScore * 100) / 100,
@@ -1176,129 +1241,40 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
         });
 
         console.log(
-          `[YOLO26 PHONE ASSOCIATED]: Class '${pair.phoneClass}' (Conf: ${Math.round(pair.phoneScore * 100)}%) -> Associated with ${targetPerson.trackId}`
+          `[PHONE DETECTED NEAR PERSON]: Class '${pair.phoneClass}' (Conf: ${Math.round(pair.phoneScore * 100)}%) -> Associated with ${targetPerson.trackId}`
         );
 
         validPhoneCandidates.push({
           class: pair.phoneClass,
           score: Math.round(pair.phoneScore * 100) / 100,
-          status: "ACCEPTED",
+          status: "PHONE_NEAR_PERSON",
           associatedTrackId: targetPerson.trackId,
           associationDistance: Math.round(pair.distance * 100) / 100,
-          reason: `ACCEPTED: Associated with ${targetPerson.trackId} (${pair.phoneClass})`
+          reason: `A cell phone was detected near ${targetPerson.trackId}; hand-held use is unverified.`
         });
       }
     });
 
-    // 5. Phone Misuse Temporal Verification (Requirements 6 & 11)
-    // Trigger "Potential Mobile Use" ONLY when:
-    //  - phone is associated with a person, AND
-    //  - detection persists across multiple consecutive frames.
-    let currentActivePhoneEvent = null;
-    let globalSirenNeeded = false;
-
-    updatedPersons.forEach((person) => {
-      const tId = person.trackId;
-
-      if (!phoneMisuseState.has(tId)) {
-        phoneMisuseState.set(tId, {
-          firstSeen: now,
-          lastSeen: now,
-          durationSec: 0,
-          warningLevel: 0,
-          sirenActive: false,
-          lastWarningTime: now,
-          lastPhoneConfidence: 0.85,
-          persistenceCount: 0,
-          missGraceCount: phoneMissGraceFrames
-        });
-      }
-
-      const state = phoneMisuseState.get(tId);
-
-      if (person.hasPhoneCandidateThisFrame) {
-        state.persistenceCount += 1;
-        state.missGraceCount = phoneMissGraceFrames;
-        state.lastSeen = now;
-        state.lastPhoneConfidence = person.associatedPhone ? person.associatedPhone.confidence : state.lastPhoneConfidence;
-      } else {
-        if (state.persistenceCount >= phonePersistenceFrames && state.missGraceCount > 0) {
-          state.missGraceCount -= 1;
-          state.lastSeen = now;
-        } else {
-          state.persistenceCount = 0;
-        }
-      }
-
-      // Requirement 6: Trigger ONLY when associated with person AND persists across consecutive frames
-      if (state.persistenceCount >= phonePersistenceFrames && state.missGraceCount > 0) {
-        person.isUsingPhone = true;
-        state.durationSec = Math.round(((now - state.firstSeen) / 1000) * 10) / 10;
-
-        if (state.durationSec >= minDurationSec) {
-          if (state.warningLevel === 0) {
-            state.warningLevel = 1;
-            state.lastWarningTime = now;
-          } else if (state.warningLevel === 1 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
-            state.warningLevel = 2;
-            state.lastWarningTime = now;
-          } else if (state.warningLevel === 2 && (now - state.lastWarningTime) / 1000 >= warningIntervalSec) {
-            state.warningLevel = 3;
-            state.lastWarningTime = now;
-          } else if (state.warningLevel >= maxWarnings) {
-            state.sirenActive = true;
-          }
-        }
-
-        if (state.sirenActive) {
-          globalSirenNeeded = true;
-        }
-
-        const phoneClassLabel = person.associatedPhone?.class || "Phone in Hand";
-
-        currentActivePhoneEvent = {
+    const potentialPhoneUse = normalizedPhones.find((phone) => phone.associatedTrackId);
+    const currentActivePhoneEvent = potentialPhoneUse
+      ? {
           phoneDetected: true,
-          associatedTrackId: tId,
-          personConfidence: person.confidence,
-          phoneConfidence: state.lastPhoneConfidence,
-          phoneClass: phoneClassLabel,
-          durationSec: state.durationSec,
-          warningLevel: state.warningLevel,
-          sirenActive: state.sirenActive,
-          persistenceFrameCount: state.persistenceCount,
-          graceFramesRemaining: state.missGraceCount,
-          warningMessage:
-            state.warningLevel === 1
-              ? `⚠️ Warning 1: Potential Mobile Use Detected (${phoneClassLabel} associated with ${tId}).`
-              : state.warningLevel === 2
-                ? `⚠️ Warning 2: Continued Mobile Phone Usage (${tId}).`
-                : state.warningLevel >= 3
-                  ? `⚠️ Final Warning: Siren Activated! Mobile Phone Usage (${tId}).`
-                  : `Potential Mobile Use: Verifying ${tId}...`
-        };
-
-      } else {
-        person.isUsingPhone = false;
-        if (state.missGraceCount <= 0 || state.persistenceCount < phonePersistenceFrames) {
-          if (now - state.lastSeen > 2000) {
-            phoneMisuseState.delete(tId);
-          }
+          associatedTrackId: potentialPhoneUse.associatedTrackId,
+          phoneConfidence: potentialPhoneUse.confidence,
+          warningLevel: 1,
+          sirenActive: false,
+          verifiedUse: false,
+          warningMessage: `Potential phone use: cell phone detected near ${potentialPhoneUse.associatedTrackId}. Verify manually; hand-held use or a call is not confirmed.`
         }
-      }
-    });
-
-    if (globalSirenNeeded) {
-      startSirenAlarm();
-    } else {
-      stopSirenAlarm();
-    }
+      : null;
 
     return {
       isModelLoaded: true,
       modelStatus: "READY",
+      faceRecognitionStatus: getFaceRecognitionStatus(),
       phoneDetectorStatus: yoloStatus.statusText,
       phoneDetectorIsActive: yoloStatus.isActive,
-      phoneDetectorModelName: YOLO26_MODEL_NAME,
+      phoneDetectorModelName: PHONE_DETECTOR_MODEL_NAME,
       personCount: updatedPersons.length,
       persons: updatedPersons,
       phones: normalizedPhones,
@@ -1314,9 +1290,10 @@ export async function detectObjectsAndMobilePhone(videoOrCanvas, config = {}) {
     return {
       isModelLoaded: true,
       modelStatus: `Inference Error: ${err.message}`,
+      faceRecognitionStatus: getFaceRecognitionStatus(),
       phoneDetectorStatus: yoloStatus.statusText,
       phoneDetectorIsActive: yoloStatus.isActive,
-      phoneDetectorModelName: YOLO26_MODEL_NAME,
+      phoneDetectorModelName: PHONE_DETECTOR_MODEL_NAME,
       personCount: 0,
       persons: [],
       phones: [],

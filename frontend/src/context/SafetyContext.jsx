@@ -181,36 +181,56 @@ export function SafetyProvider({ children }) {
   // Connect Webcam Stream
   const connectWebcam = async () => {
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("This browser does not support webcam access. Open the app in a secure context and try again.");
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
         video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
       });
+      if (activeStream && activeStream !== stream) {
+        activeStream.getTracks().forEach((track) => track.stop());
+      }
+      if (streamSource?.url?.startsWith("blob:")) {
+        URL.revokeObjectURL(streamSource.url);
+      }
       setActiveStream(stream);
       const camConfig = { type: "webcam", name: "Webcam Input (HD)", url: "local://webcam" };
       setStreamSource(camConfig);
 
-      await registerCameraApi({ name: camConfig.name, source_type: "webcam", source_url: camConfig.url });
+      const registered = await registerCameraApi({ name: camConfig.name, source_type: "webcam", source_url: camConfig.url });
+      if (!registered) {
+        console.warn("Webcam is running locally, but camera metadata could not be saved to the backend.");
+      }
       await refreshBackendData();
       return { success: true, stream };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: err instanceof Error ? err.message : "Webcam connection failed." };
     }
   };
 
-  // Connect RTSP URL
+  // RTSP streams need a backend decoder and browser-compatible stream endpoint.
   const connectRtsp = async (rtspUrl, name = "IP Camera RTSP") => {
-    const camConfig = { type: "rtsp", name: name || "IP RTSP Camera", url: rtspUrl };
-    setStreamSource(camConfig);
-    await registerCameraApi({ name: camConfig.name, source_type: "rtsp", source_url: rtspUrl });
-    await refreshBackendData();
-    return { success: true };
+    void rtspUrl;
+    void name;
+    return {
+      success: false,
+      error: "RTSP playback is not implemented in this app yet. The URL cannot be used as a live feed until a backend RTSP decoder is added. Connect a webcam or upload a video instead."
+    };
   };
 
   // Connect Video File Upload
   const connectVideoFile = async (file) => {
     const fileUrl = URL.createObjectURL(file);
+    if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
+    if (streamSource?.url?.startsWith("blob:")) URL.revokeObjectURL(streamSource.url);
+    setActiveStream(null);
     const camConfig = { type: "file", name: `File: ${file.name}`, url: fileUrl };
     setStreamSource(camConfig);
-    await registerCameraApi({ name: camConfig.name, source_type: "file", source_url: file.name });
+    const registered = await registerCameraApi({ name: camConfig.name, source_type: "file", source_url: file.name });
+    if (!registered) {
+      console.warn("Video is playing locally, but camera metadata could not be saved to the backend.");
+    }
     await refreshBackendData();
     return { success: true, fileUrl };
   };
@@ -218,9 +238,15 @@ export function SafetyProvider({ children }) {
   // Connect Image File Upload (JPG, JPEG, PNG)
   const connectImageFile = async (file) => {
     const fileUrl = URL.createObjectURL(file);
+    if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
+    if (streamSource?.url?.startsWith("blob:")) URL.revokeObjectURL(streamSource.url);
+    setActiveStream(null);
     const camConfig = { type: "image", name: `Image: ${file.name}`, url: fileUrl };
     setStreamSource(camConfig);
-    await registerCameraApi({ name: camConfig.name, source_type: "image", source_url: file.name });
+    const registered = await registerCameraApi({ name: camConfig.name, source_type: "file", source_url: file.name });
+    if (!registered) {
+      console.warn("Image is available locally, but camera metadata could not be saved to the backend.");
+    }
     await refreshBackendData();
     return { success: true, fileUrl };
   };
@@ -230,6 +256,7 @@ export function SafetyProvider({ children }) {
     if (activeStream && activeStream.getTracks) {
       activeStream.getTracks().forEach((track) => track.stop());
     }
+    if (streamSource?.url?.startsWith("blob:")) URL.revokeObjectURL(streamSource.url);
     setActiveStream(null);
     setStreamSource(null);
     setPersonCount(0);
@@ -416,11 +443,14 @@ export function SafetyProvider({ children }) {
 
   // Registered Personnel Identity Registration Handlers
   const registerPerson = async (personData) => {
+    const res = await createRegisteredPersonnelApi(personData);
+    if (res?.status !== "SUCCESS") {
+      throw new Error("Personnel registration was not confirmed by the backend.");
+    }
     setRegisteredPersonnel((prev) => [
       ...prev.filter((p) => p.id !== personData.id && p.track_id !== personData.track_id),
-      personData
+      { ...personData, face_descriptors: res.face_descriptors }
     ]);
-    const res = await createRegisteredPersonnelApi(personData);
     await refreshBackendData();
     return res;
   };

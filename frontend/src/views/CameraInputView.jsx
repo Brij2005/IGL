@@ -8,14 +8,13 @@ export default function CameraInputView() {
     connectWebcam,
     connectRtsp,
     connectVideoFile,
+    connectImageFile,
     disconnectStream,
     streamSource,
     activeStream,
     personCount,
-    setPersonCount,
     streamMetrics,
     setStreamMetrics,
-    recordObservation
   } = useSafety();
 
   const [rtspUrl, setRtspUrl] = useState("rtsp://192.168.1.100:554/live/ch01");
@@ -25,15 +24,43 @@ export default function CameraInputView() {
   const [isMirrored, setIsMirrored] = useState(true); // Horizontal mirror flip toggle
 
   const videoRef = useRef(null);
+  const imageRef = useRef(null);
   const canvasRef = useRef(null);
 
-  // Attach MediaStream to Video element
+  // Attach the selected live, video-file, or image source to its matching element.
   useEffect(() => {
-    if (videoRef.current && activeStream && activeStream instanceof MediaStream) {
-      videoRef.current.srcObject = activeStream;
-      videoRef.current.play().catch((e) => console.log("Auto play error:", e));
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (activeStream instanceof MediaStream) {
+      if (video.srcObject !== activeStream) {
+        video.pause();
+        video.removeAttribute("src");
+        video.srcObject = activeStream;
+      }
+      if (video.paused) {
+        video.play().catch((playError) => {
+          if (playError.name !== "AbortError") setError(`Camera stream could not start: ${playError.message}`);
+        });
+      }
+    } else if (streamSource?.type === "file" && streamSource.url) {
+      if (video.getAttribute("src") !== streamSource.url) {
+        video.pause();
+        video.srcObject = null;
+        video.src = streamSource.url;
+        video.load();
+      }
+      if (video.paused) {
+        video.play().catch((playError) => {
+          if (playError.name !== "AbortError") setError(`Uploaded video could not play: ${playError.message}`);
+        });
+      }
+    } else {
+      video.pause();
+      video.srcObject = null;
+      video.removeAttribute("src");
     }
-  }, [activeStream]);
+  }, [activeStream, streamSource]);
 
   // Frame processing loop for FPS, resolution, brightness, and blur metrics
   useEffect(() => {
@@ -45,17 +72,32 @@ export default function CameraInputView() {
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      if (video && canvas && video.readyState === 4) {
-        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-          canvas.width = video.videoWidth || 640;
-          canvas.height = video.videoHeight || 360;
+      const isVideoSource = streamSource?.type === "webcam" || streamSource?.type === "file";
+      const isImageSource = streamSource?.type === "image" && imageRef.current?.complete;
+      const source = isVideoSource && video?.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        ? video
+        : isImageSource
+          ? imageRef.current
+          : null;
+
+      if (source && canvas) {
+        const sourceWidth = source.videoWidth || source.naturalWidth;
+        const sourceHeight = source.videoHeight || source.naturalHeight;
+        if (!sourceWidth || !sourceHeight) {
+          animationFrameId = requestAnimationFrame(processFrameLoop);
+          return;
+        }
+        if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
+          canvas.width = sourceWidth;
+          canvas.height = sourceHeight;
         }
 
         const ctx = canvas.getContext("2d");
+        if (!ctx) return;
         ctx.save();
         ctx.translate(canvas.width, 0);
         ctx.scale(-1, 1);
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
         ctx.restore();
 
         // Frame rate calculation
@@ -73,9 +115,9 @@ export default function CameraInputView() {
 
           setStreamMetrics((prev) => ({
             ...prev,
-            fps: calculatedFps,
-            width: video.videoWidth,
-            height: video.videoHeight,
+            fps: isImageSource ? 0 : calculatedFps,
+            width: sourceWidth,
+            height: sourceHeight,
             brightness: quality.brightness,
             blurScore: quality.blurScore,
             isAssessable: quality.isAssessable,
@@ -94,51 +136,31 @@ export default function CameraInputView() {
     return () => cancelAnimationFrame(animationFrameId);
   }, [streamSource, setStreamMetrics]);
 
-  // Auto-record person tracking observations into SQLite DB only when actual detected person count > 0
-  useEffect(() => {
-    let timer;
-    if (streamSource) {
-      const logAllDetectedPeople = () => {
-        const total = Number.isFinite(personCount) ? personCount : 0;
-        if (total <= 0) {
-          return;
-        }
-
-        for (let i = 1; i <= total; i++) {
-          const trackId = `TRK-P10${i} (Person #${i})`;
-          recordObservation({
-            track_id: trackId,
-            zone_name: streamSource.name || "Live Camera Bay",
-            object_type: "person",
-            confidence: Math.min(0.99, 0.94 + i * 0.02)
-          });
-        }
-      };
-
-      // Initial log
-      logAllDetectedPeople();
-
-      // Log update every 5 seconds for actual detected persons
-      timer = setInterval(logAllDetectedPeople, 5000);
-    }
-
-    return () => clearInterval(timer);
-  }, [streamSource, personCount]);
-
   const handleWebcamConnect = async () => {
     setConnecting(true);
     setError(null);
-    const res = await connectWebcam();
-    setConnecting(false);
-    if (!res.success) setError(res.error);
+    try {
+      const res = await connectWebcam();
+      if (!res.success) setError(res.error);
+    } catch (connectError) {
+      setError(connectError.message || "Could not connect the webcam.");
+    } finally {
+      setConnecting(false);
+    }
   };
 
   const handleRtspConnect = async (e) => {
     e.preventDefault();
     setConnecting(true);
     setError(null);
-    await connectRtsp(rtspUrl, cameraName);
-    setConnecting(false);
+    try {
+      const result = await connectRtsp(rtspUrl, cameraName);
+      if (!result.success) setError(result.error);
+    } catch (connectError) {
+      setError(connectError.message || "Could not connect the RTSP camera.");
+    } finally {
+      setConnecting(false);
+    }
   };
 
   const handleFileUpload = async (e) => {
@@ -146,18 +168,19 @@ export default function CameraInputView() {
     if (file) {
       setConnecting(true);
       setError(null);
-      if (file.type.startsWith("image/")) {
-        const res = await connectImageFile(file);
-        setConnecting(false);
-      } else {
-        const res = await connectVideoFile(file);
-        setConnecting(false);
-
-        if (videoRef.current && res.fileUrl) {
-          videoRef.current.srcObject = null;
-          videoRef.current.src = res.fileUrl;
-          videoRef.current.play();
+      try {
+        if (file.type.startsWith("image/")) {
+          await connectImageFile(file);
+        } else if (file.type.startsWith("video/")) {
+          await connectVideoFile(file);
+        } else {
+          setError("Choose a supported JPG, PNG, MP4 or WebM file.");
         }
+      } catch (uploadError) {
+        setError(uploadError.message || "The selected media could not be loaded.");
+      } finally {
+        setConnecting(false);
+        e.target.value = "";
       }
     }
   };
@@ -214,7 +237,7 @@ export default function CameraInputView() {
             </div>
             <h3 className="text-sm font-bold text-slate-200">Option 2: IP CCTV Camera (RTSP)</h3>
             <p className="text-xs text-slate-400">
-              Enter your factory CCTV network camera URL (RTSP address).
+              Direct RTSP decoding is not available yet. This option will report that limitation instead of showing a fake connected feed.
             </p>
           </div>
 
@@ -239,7 +262,7 @@ export default function CameraInputView() {
               className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"
             >
               <Radio className="w-4 h-4" />
-              <span>Connect CCTV Camera</span>
+              <span>Check RTSP Support</span>
             </button>
           </form>
         </div>
@@ -296,16 +319,31 @@ export default function CameraInputView() {
 
         {/* Video & Hidden Canvas */}
         <div className="relative rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex items-center justify-center">
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            controls={streamSource?.type === "file"}
-            className={`w-full h-full object-contain transition-transform duration-300 ${
-              isMirrored ? "-scale-x-100" : ""
-            }`}
-          />
+          {streamSource?.type === "image" ? (
+            <img
+              ref={imageRef}
+              src={streamSource.url}
+              alt={streamSource.name}
+              onError={() => setError("Uploaded image could not be loaded. Choose another image file.")}
+              className={`w-full h-full object-contain transition-transform duration-300 ${
+                isMirrored ? "-scale-x-100" : ""
+              }`}
+            />
+          ) : (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              controls={streamSource?.type === "file"}
+              onError={() => {
+                if (streamSource?.type === "file") setError("Uploaded video could not be decoded by this browser.");
+              }}
+              className={`w-full h-full object-contain transition-transform duration-300 ${
+                isMirrored ? "-scale-x-100" : ""
+              }`}
+            />
+          )}
           <canvas ref={canvasRef} className="hidden" />
 
           {!streamSource && (

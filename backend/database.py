@@ -3,12 +3,18 @@ import os
 import json
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "igl_safety.db")
+DB_PATH = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "igl_safety.db"))
+
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
 
 def init_db():
     conn = get_db_connection()
@@ -215,10 +221,18 @@ def init_db():
         name TEXT NOT NULL,
         designation TEXT DEFAULT 'Registered Worker',
         department TEXT DEFAULT 'Operations',
+        face_descriptors TEXT NOT NULL DEFAULT '[]',
         registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+    personnel_columns = {
+        row["name"] for row in cursor.execute("PRAGMA table_info(registered_personnel)").fetchall()
+    }
+    if "face_descriptors" not in personnel_columns:
+        cursor.execute(
+            "ALTER TABLE registered_personnel ADD COLUMN face_descriptors TEXT NOT NULL DEFAULT '[]'"
+        )
 
     # Seed initial sample registered workers if table is empty
     cursor.execute("SELECT COUNT(*) FROM registered_personnel")
@@ -231,6 +245,12 @@ def init_db():
         INSERT INTO registered_personnel (id, track_id, name, designation, department)
         VALUES (?, ?, ?, ?, ?)
         """, default_registered)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cameras_status ON cameras(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_event_type ON alerts(event_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_observations_object_type ON observations(object_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_restricted_zones_camera_id ON restricted_zones(camera_id)")
 
     conn.commit()
     conn.close()

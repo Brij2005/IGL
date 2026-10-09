@@ -426,7 +426,7 @@ export default function ImageCameraInspectionView() {
                   } else if (c === "cell phone" || c === "phone" || c === "mobile phone" || c.includes("phone")) {
                     color = "#f59e0b";
                     const matchedPhone = (result.phones || [])[idx] || (result.phones || [])[0];
-                    const phoneLabel = matchedPhone?.class || item.class || "Phone in Hand";
+                    const phoneLabel = matchedPhone?.class || item.class || "Cell phone";
                     labelText = `${phoneLabel}: ${scorePct}%`;
                     if (matchedPhone?.box) box = matchedPhone.box;
                   } else if (c === "backpack" || c === "bag" || c === "handbag") {
@@ -518,19 +518,25 @@ export default function ImageCameraInspectionView() {
     };
   }, [streamSource, inputMode, showBoxes, showZones, isMirrored, restrictedZones, personCount, config]);
 
-  // Capture Canvas Snapshot and Dispatch Alert
+  // Capture evidence for manual review without asserting an unverified PPE violation.
   const handleCaptureEvidenceAlert = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const base64Snap = captureCanvasSnapshot(canvas, "SAFETY INSPECTION EVIDENCE");
+    const base64Snap = captureCanvasSnapshot(canvas, "MANUAL SAFETY REVIEW");
 
     dispatchAlert({
-      event_type: "PPE_VIOLATION",
+      event_type: "MANUAL_REVIEW",
       zone_name: inputMode === "image" ? `Uploaded Image (${uploadedFileName})` : "Live Camera Stream",
-      severity: "HIGH",
-      confidence: 0.95,
+      severity: "MEDIUM",
+      confidence: 0,
       evidence_image_base64: base64Snap,
-      metadata: { source: inputMode, file_name: uploadedFileName, detected_persons: personCount }
+      metadata: {
+        source: "operator_submitted",
+        input_mode: inputMode,
+        file_name: uploadedFileName,
+        detected_persons: personCount,
+        review_required: true
+      }
     });
   };
 
@@ -1020,7 +1026,7 @@ export default function ImageCameraInspectionView() {
               className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition shadow-lg shadow-red-500/20 flex items-center justify-center gap-2"
             >
               <ShieldAlert className="w-4 h-4" />
-              <span>Capture Photo & Trigger Incident Alert</span>
+              <span>Capture Photo for Manual Review</span>
             </button>
           </div>
         </div>

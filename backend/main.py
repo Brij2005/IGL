@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 import sqlite3
 import json
 import uuid
 import base64
+import math
 from datetime import datetime
 import os
 
@@ -12,14 +14,141 @@ from database import init_db, get_db_connection
 from ai_engine import assess_frame_quality, is_point_in_polygon, calculate_distance
 from whatsapp_service import get_whatsapp_status_info, send_whatsapp_test, send_whatsapp_alert
 
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
+]
+
+MAX_YOLO_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_YOLO_IMAGE_BASE64_CHARS = ((MAX_YOLO_IMAGE_BYTES + 2) // 3) * 4 + 128
+MAX_YOLO_IMAGE_DIMENSION = 4096
+MAX_YOLO_IMAGE_PIXELS = 16_000_000
+
+class CameraRegistrationRequest(BaseModel):
+    name: str = Field(default="Camera Input", min_length=1, max_length=100)
+    source_type: str = Field(default="webcam")
+    source_url: str = Field(default="")
+
+    @field_validator("source_type")
+    @classmethod
+    def validate_source_type(cls, value: str) -> str:
+        allowed = {"webcam", "rtsp", "file"}
+        if value not in allowed:
+            raise ValueError("source_type must be one of: webcam, rtsp, file")
+        return value
+
+
+class CameraStatusUpdateRequest(BaseModel):
+    status: str = Field(default="ONLINE")
+    not_assessable_reason: str | None = None
+    fps: float = Field(default=0.0, ge=0.0, le=120.0)
+    latency_ms: float = Field(default=0.0, ge=0.0, le=10000.0)
+    brightness: float = Field(default=0.0, ge=0.0, le=255.0)
+    blur_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        allowed = {"ONLINE", "OFFLINE", "NOT_ASSESSABLE", "DISCONNECTED"}
+        if value not in allowed:
+            raise ValueError("status must be one of: ONLINE, OFFLINE, NOT_ASSESSABLE, DISCONNECTED")
+        return value
+
+
+class FrameProcessRequest(BaseModel):
+    image_base64: str = Field(..., min_length=20)
+
+
+class YoloDetectRequest(BaseModel):
+    image_base64: str = Field(..., min_length=20, max_length=MAX_YOLO_IMAGE_BASE64_CHARS)
+    conf: float = Field(default=0.10, ge=0.0, le=1.0)
+    imgsz: int = Field(default=1280, gt=0, le=1280)
+
+
+class AlertCreateRequest(BaseModel):
+    event_type: str = Field(..., min_length=1, max_length=80)
+    camera_id: str = Field(..., min_length=1, max_length=80)
+    camera_name: str = Field(default="Live Stream", min_length=1, max_length=120)
+    zone_name: str = Field(default="General Area", min_length=1, max_length=120)
+    severity: str = Field(default="HIGH")
+    confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    evidence_image_base64: str = Field(default="")
+    metadata: dict = Field(default_factory=dict)
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, value: str) -> str:
+        allowed = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+        normalized = value.upper()
+        if normalized not in allowed:
+            raise ValueError("severity must be one of: LOW, MEDIUM, HIGH, CRITICAL")
+        return normalized
+
+
+class AlertAckRequest(BaseModel):
+    user: str = Field(default="Controller / Safety Officer", min_length=1, max_length=120)
+
+
+class AlertResolveRequest(BaseModel):
+    user: str = Field(default="Safety Manager", min_length=1, max_length=120)
+    notes: str = Field(default="On-site verification complete. Risk mitigated.", min_length=1, max_length=500)
+
+
+class ObservationCreateRequest(BaseModel):
+    track_id: str = Field(default="", min_length=0, max_length=80)
+    camera_id: str = Field(default="CAM-01", min_length=1, max_length=80)
+    zone_name: str = Field(default="Zone A", min_length=1, max_length=120)
+    object_type: str = Field(default="person")
+    bounding_box: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
+    feature_vector: dict = Field(default_factory=dict)
+    confidence: float = Field(default=0.92, ge=0.0, le=1.0)
+
+    @field_validator("object_type")
+    @classmethod
+    def validate_object_type(cls, value: str) -> str:
+        normalized = value.lower()
+        allowed = {"person", "vehicle", "hazmat"}
+        if normalized not in allowed:
+            raise ValueError("object_type must be one of: person, vehicle, hazmat")
+        return normalized
+
+
+class PersonnelAnomalyRequest(BaseModel):
+    feature_vector: dict = Field(default_factory=dict)
+
+
+class RegisteredPersonnelRequest(BaseModel):
+    id: str = Field(..., min_length=1, max_length=80)
+    track_id: str = Field(default="", max_length=80)
+    name: str = Field(..., min_length=1, max_length=120)
+    designation: str = Field(default="Registered Worker", max_length=120)
+    department: str = Field(default="Operations", max_length=120)
+    face_descriptors: list[list[float]] = Field(default_factory=list)
+
+    @field_validator("face_descriptors")
+    @classmethod
+    def validate_face_descriptors(cls, descriptors: list[list[float]]) -> list[list[float]]:
+        if not descriptors:
+            return descriptors
+        if not 3 <= len(descriptors) <= 5:
+            raise ValueError("Provide either no face templates or 3 to 5 face templates")
+        for descriptor in descriptors:
+            if len(descriptor) != 128 or not all(math.isfinite(value) for value in descriptor):
+                raise ValueError("Each face template must contain 128 finite values")
+        return descriptors
+
+
 app = FastAPI(title="IGL Industrial AI Safety Intelligence API", version="1.0.0")
 
-# Enable CORS for frontend Vite application
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -106,11 +235,7 @@ def list_cameras():
     return cameras
 
 @app.post("/api/cameras")
-def register_camera(payload: dict = Body(...)):
-    name = payload.get("name", "Camera Input")
-    source_type = payload.get("source_type", "webcam") # 'webcam', 'rtsp', 'file'
-    source_url = payload.get("source_url", "")
-    
+def register_camera(payload: CameraRegistrationRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -120,31 +245,25 @@ def register_camera(payload: dict = Body(...)):
     cursor.execute("""
     INSERT INTO cameras (id, name, source_type, source_url, status, resolution, last_seen)
     VALUES (?, ?, ?, ?, 'ONLINE', '1920x1080', ?)
-    """, (cam_id, name, source_type, source_url, now))
+    """, (cam_id, payload.name, payload.source_type, payload.source_url, now))
 
     conn.commit()
     conn.close()
 
-    return {"status": "SUCCESS", "camera": {"id": cam_id, "name": name, "source_type": source_type, "status": "ONLINE"}}
+    return {"status": "SUCCESS", "camera": {"id": cam_id, "name": payload.name, "source_type": payload.source_type, "status": "ONLINE"}}
 
 @app.put("/api/cameras/{camera_id}/status")
-def update_camera_status(camera_id: str, payload: dict = Body(...)):
+def update_camera_status(camera_id: str, payload: CameraStatusUpdateRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    status = payload.get("status", "ONLINE")
-    reason = payload.get("not_assessable_reason", None)
-    fps = payload.get("fps", 0.0)
-    latency_ms = payload.get("latency_ms", 0.0)
-    brightness = payload.get("brightness", 0.0)
-    blur_score = payload.get("blur_score", 0.0)
     now = datetime.now().isoformat()
 
     cursor.execute("""
     UPDATE cameras 
     SET status = ?, not_assessable_reason = ?, fps = ?, latency_ms = ?, brightness = ?, blur_score = ?, last_seen = ?
     WHERE id = ?
-    """, (status, reason, fps, latency_ms, brightness, blur_score, now, camera_id))
+    """, (payload.status, payload.not_assessable_reason, payload.fps, payload.latency_ms, payload.brightness, payload.blur_score, now, camera_id))
 
     conn.commit()
     conn.close()
@@ -155,15 +274,12 @@ def update_camera_status(camera_id: str, payload: dict = Body(...)):
 # FRAME QUALITY API (Real OpenCV Frame Inspection)
 # ----------------------------------------------------
 @app.post("/api/process-frame")
-def process_frame(payload: dict = Body(...)):
+def process_frame(payload: FrameProcessRequest):
     """
     Receives base64 frame from frontend video element, decodes bytes, runs actual brightness & blur check.
     """
-    image_base64 = payload.get("image_base64", "")
-    if not image_base64:
-        return {"is_assessable": False, "reason": "No image data provided"}
+    image_base64 = payload.image_base64
 
-    # Strip header if present
     if "," in image_base64:
         image_base64 = image_base64.split(",")[1]
 
@@ -184,47 +300,72 @@ def get_yolo_model():
     if yolo_model_handle is None:
         try:
             from ultralytics import YOLO
-            yolo_model_handle = YOLO('yolov8n.pt')
-            print(f"✅ Backend PyTorch YOLO Model Loaded: {getattr(yolo_model_handle, 'ckpt_path', 'yolov8n.pt')}")
+            model_target = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt")
+            if not os.path.isabs(model_target):
+                backend_dir = os.path.dirname(os.path.abspath(__file__))
+                candidate = os.path.join(backend_dir, model_target)
+                if os.path.exists(candidate):
+                    model_target = candidate
+            yolo_model_handle = YOLO(model_target)
+            print(f"✅ Backend PyTorch YOLO Model Loaded: {getattr(yolo_model_handle, 'ckpt_path', model_target)}")
             print(f"   Model Classes: {len(yolo_model_handle.names)} classes. Cell phone class ID 67: {yolo_model_handle.names.get(67)}")
         except Exception as e:
             print(f"❌ Failed to load Ultralytics YOLO: {e}")
             yolo_model_handle = False
     return yolo_model_handle if yolo_model_handle is not False else None
 
+
+
+def decode_yolo_image(image_base64: str) -> bytes:
+    encoded_image = image_base64.partition(",")[2] if "," in image_base64 else image_base64
+    try:
+        image_bytes = base64.b64decode(encoded_image, validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail="image_base64 must contain valid base64 image data") from exc
+
+    if not image_bytes:
+        raise HTTPException(status_code=422, detail="image_base64 must not be empty")
+    if len(image_bytes) > MAX_YOLO_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image exceeds the {MAX_YOLO_IMAGE_BYTES // (1024 * 1024)} MiB limit",
+        )
+    return image_bytes
+
+
 @app.post("/api/yolo/detect")
-def detect_yolo_objects(payload: dict = Body(...)):
+def detect_yolo_objects(payload: YoloDetectRequest):
     """
     Runs PyTorch YOLO model directly on frame image bytes.
     Accepts conf (default 0.10) and imgsz (default 1280).
     Returns raw YOLO detections with class_name, class_id, confidence, and normalized bounding box [norm_x, norm_y, norm_w, norm_h].
     """
-    image_base64 = payload.get("image_base64", "")
-    conf_thresh = float(payload.get("conf", 0.10))
-    img_size = int(payload.get("imgsz", 1280))
-
-    if not image_base64:
-        return {"status": "ERROR", "message": "No image data provided", "detections": []}
-
-    if "," in image_base64:
-        image_base64 = image_base64.split(",")[1]
+    image_bytes = decode_yolo_image(payload.image_base64)
+    conf_thresh = payload.conf
+    img_size = payload.imgsz
 
     try:
         import numpy as np
         import cv2
 
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=422, detail="image_base64 does not contain a supported image")
+
+        h, w, _ = img.shape
+        if max(w, h) > MAX_YOLO_IMAGE_DIMENSION or w * h > MAX_YOLO_IMAGE_PIXELS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Image dimensions must be at most {MAX_YOLO_IMAGE_DIMENSION}px "
+                    f"per side and {MAX_YOLO_IMAGE_PIXELS:,} total pixels"
+                ),
+            )
+
         model = get_yolo_model()
         if not model:
             return {"status": "OFFLINE", "message": "Backend YOLO Model Unavailable", "detections": []}
-
-        image_bytes = base64.b64decode(image_base64)
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if img is None:
-            return {"status": "ERROR", "message": "Invalid image payload", "detections": []}
-
-        h, w, _ = img.shape
 
         # Run PyTorch YOLO Inference directly on image (Requirements 1-6)
         results = model.predict(source=img, conf=conf_thresh, imgsz=img_size, save=False)
@@ -272,9 +413,11 @@ def detect_yolo_objects(payload: dict = Body(...)):
             "model_classes_count": len(model.names)
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Backend YOLO Inference Error: {e}")
-        return {"status": "ERROR", "message": str(e), "detections": []}
+        raise HTTPException(status_code=500, detail="YOLO inference failed") from e
 
 # ----------------------------------------------------
 # ALERTS & EVIDENCE ENDPOINTS
@@ -300,7 +443,7 @@ def get_alerts():
     return alerts
 
 @app.post("/api/alerts")
-def create_alert(payload: dict = Body(...)):
+def create_alert(payload: AlertCreateRequest):
     """
     Ingests a real detection alert generated from actual camera input processing.
     """
@@ -308,14 +451,6 @@ def create_alert(payload: dict = Body(...)):
     cursor = conn.cursor()
 
     alert_id = f"ALT-{uuid.uuid4().hex[:8].upper()}"
-    event_type = payload.get("event_type")
-    camera_id = payload.get("camera_id")
-    camera_name = payload.get("camera_name", "Live Stream")
-    zone_name = payload.get("zone_name", "General Area")
-    severity = payload.get("severity", "HIGH")
-    confidence = payload.get("confidence", 0.90)
-    evidence_image_base64 = payload.get("evidence_image_base64", "")
-    metadata = payload.get("metadata", {})
     now = datetime.now().isoformat()
 
     cursor.execute("""
@@ -324,8 +459,8 @@ def create_alert(payload: dict = Body(...)):
         confidence, evidence_image_base64, metadata_json, detected_at
     ) VALUES (?, ?, ?, ?, ?, ?, 'DETECTED', ?, ?, ?, ?)
     """, (
-        alert_id, event_type, camera_id, camera_name, zone_name, severity,
-        confidence, evidence_image_base64, json.dumps(metadata), now
+        alert_id, payload.event_type, payload.camera_id, payload.camera_name, payload.zone_name, payload.severity,
+        payload.confidence, payload.evidence_image_base64, json.dumps(payload.metadata), now
     ))
 
     conn.commit()
@@ -334,8 +469,7 @@ def create_alert(payload: dict = Body(...)):
     return {"status": "SUCCESS", "alert_id": alert_id, "detected_at": now}
 
 @app.put("/api/alerts/{alert_id}/acknowledge")
-def acknowledge_alert(alert_id: str, payload: dict = Body(...)):
-    user = payload.get("user", "Controller / Safety Officer")
+def acknowledge_alert(alert_id: str, payload: AlertAckRequest):
     now = datetime.now().isoformat()
 
     conn = get_db_connection()
@@ -345,7 +479,7 @@ def acknowledge_alert(alert_id: str, payload: dict = Body(...)):
     UPDATE alerts 
     SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?
     WHERE id = ?
-    """, (now, user, alert_id))
+    """, (now, payload.user, alert_id))
 
     conn.commit()
     conn.close()
@@ -353,9 +487,7 @@ def acknowledge_alert(alert_id: str, payload: dict = Body(...)):
     return {"status": "ACKNOWLEDGED", "alert_id": alert_id, "time": now}
 
 @app.put("/api/alerts/{alert_id}/resolve")
-def resolve_alert(alert_id: str, payload: dict = Body(...)):
-    user = payload.get("user", "Safety Manager")
-    notes = payload.get("notes", "On-site verification complete. Risk mitigated.")
+def resolve_alert(alert_id: str, payload: AlertResolveRequest):
     now = datetime.now().isoformat()
 
     conn = get_db_connection()
@@ -365,7 +497,7 @@ def resolve_alert(alert_id: str, payload: dict = Body(...)):
     UPDATE alerts 
     SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, resolution_notes = ?
     WHERE id = ?
-    """, (now, user, notes, alert_id))
+    """, (now, payload.user, payload.notes, alert_id))
 
     conn.commit()
     conn.close()
@@ -386,23 +518,17 @@ def get_observations():
     return [dict(row) for row in rows]
 
 @app.post("/api/observations")
-def record_observation(payload: dict = Body(...)):
+def record_observation(payload: ObservationCreateRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    track_id = payload.get("track_id", f"TRK-{uuid.uuid4().hex[:4]}")
-    camera_id = payload.get("camera_id", "CAM-01")
-    zone_name = payload.get("zone_name", "Zone A")
-    object_type = payload.get("object_type", "person")
-    bounding_box = payload.get("bounding_box", [0, 0, 0, 0])
-    feature_vector = payload.get("feature_vector", {})
-    confidence = payload.get("confidence", 0.92)
+    track_id = payload.track_id or f"TRK-{uuid.uuid4().hex[:4]}"
     now = datetime.now().isoformat()
 
     cursor.execute("""
     INSERT INTO observations (track_id, camera_id, zone_name, object_type, bounding_box, feature_vector, confidence, timestamp)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (track_id, camera_id, zone_name, object_type, json.dumps(bounding_box), json.dumps(feature_vector), confidence, now))
+    """, (track_id, payload.camera_id, payload.zone_name, payload.object_type, json.dumps(payload.bounding_box), json.dumps(payload.feature_vector), payload.confidence, now))
 
     conn.commit()
     conn.close()
@@ -410,7 +536,7 @@ def record_observation(payload: dict = Body(...)):
     return {"status": "RECORDED", "track_id": track_id}
 
 @app.post("/api/personnel/check-anomaly")
-def check_personnel_anomaly(payload: dict = Body(...)):
+def check_personnel_anomaly(payload: PersonnelAnomalyRequest):
     """
     Compares observed person feature signature against actual stored SQLite observation history.
     If 0 historical observations exist, returns INSUFFICIENT_HISTORICAL_DATA.
@@ -429,22 +555,24 @@ def check_personnel_anomaly(payload: dict = Body(...)):
             "is_anomaly": False
         }
 
-    # Retrieve stored feature signatures
     cursor.execute("SELECT track_id, feature_vector, timestamp FROM observations WHERE object_type = 'person'")
     records = cursor.fetchall()
     conn.close()
 
-    current_vector = payload.get("feature_vector", {})
-    
-    # Simple color/signature similarity matching against stored history
-    # Returns matched identity or declares NEW / UNRECOGNIZED personnel
+    current_vector = payload.feature_vector
+    if not current_vector:
+        return {
+            "status": "INVALID_FEATURE_VECTOR",
+            "reason": "No feature vector provided for anomaly comparison.",
+            "is_anomaly": True
+        }
+
     matched_track = None
     min_dist = 999.0
 
     for r in records:
         try:
             vec = json.loads(r["feature_vector"])
-            # Compare feature vectors
             if current_vector and vec:
                 diff = abs(current_vector.get("r_avg", 0) - vec.get("r_avg", 0)) + \
                        abs(current_vector.get("g_avg", 0) - vec.get("g_avg", 0)) + \
@@ -452,7 +580,7 @@ def check_personnel_anomaly(payload: dict = Body(...)):
                 if diff < min_dist:
                     min_dist = diff
                     matched_track = r["track_id"]
-        except:
+        except Exception:
             continue
 
     if min_dist < 45.0 and matched_track:
@@ -950,29 +1078,46 @@ def list_registered_personnel():
     cursor.execute("SELECT * FROM registered_personnel ORDER BY registered_at DESC")
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    personnel = []
+    for row in rows:
+        person = dict(row)
+        try:
+            person["face_descriptors"] = json.loads(person.get("face_descriptors") or "[]")
+        except (TypeError, json.JSONDecodeError) as error:
+            conn.close()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Stored face templates for personnel {person['id']} are invalid",
+            ) from error
+        personnel.append(person)
+    return personnel
 
 @app.post("/api/registered-personnel")
-def create_registered_person(payload: dict = Body(...)):
-    person_id = payload.get("id") or f"EMP-{uuid.uuid4().hex[:4].upper()}"
-    track_id = payload.get("track_id") or ""
-    name = payload.get("name", "Registered Worker")
-    designation = payload.get("designation", "Registered Worker")
-    department = payload.get("department", "Operations")
+def create_registered_person(payload: RegisteredPersonnelRequest):
+    person_id = payload.id
+    track_id = payload.track_id
+    name = payload.name
+    designation = payload.designation
+    department = payload.department
+    face_descriptors = json.dumps(payload.face_descriptors)
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-    INSERT INTO registered_personnel (id, track_id, name, designation, department)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO registered_personnel (id, track_id, name, designation, department, face_descriptors)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
         track_id = excluded.track_id,
         name = excluded.name,
         designation = excluded.designation,
         department = excluded.department,
+        face_descriptors = CASE
+            WHEN excluded.face_descriptors = '[]' THEN registered_personnel.face_descriptors
+            ELSE excluded.face_descriptors
+        END,
         updated_at = CURRENT_TIMESTAMP
-    """, (person_id, track_id, name, designation, department))
+    """, (person_id, track_id, name, designation, department, face_descriptors))
 
     conn.commit()
     conn.close()
@@ -982,7 +1127,8 @@ def create_registered_person(payload: dict = Body(...)):
         "track_id": track_id,
         "name": name,
         "designation": designation,
-        "department": department
+        "department": department,
+        "face_descriptors": payload.face_descriptors
     }
 
 @app.put("/api/registered-personnel/{person_id}")
@@ -991,6 +1137,18 @@ def update_registered_person(person_id: str, payload: dict = Body(...)):
     track_id = payload.get("track_id")
     designation = payload.get("designation")
     department = payload.get("department")
+    face_descriptors = payload.get("face_descriptors")
+    if face_descriptors is not None:
+        if not isinstance(face_descriptors, list) or not 3 <= len(face_descriptors) <= 5:
+            raise HTTPException(status_code=422, detail="At least 3 face samples are required")
+        if any(
+            not isinstance(descriptor, list)
+            or len(descriptor) != 128
+            or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in descriptor)
+            for descriptor in face_descriptors
+        ):
+            raise HTTPException(status_code=422, detail="Each face template must contain 128 finite values")
+        face_descriptors = json.dumps(face_descriptors)
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1001,9 +1159,10 @@ def update_registered_person(person_id: str, payload: dict = Body(...)):
         track_id = COALESCE(?, track_id),
         designation = COALESCE(?, designation),
         department = COALESCE(?, department),
+        face_descriptors = COALESCE(?, face_descriptors),
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-    """, (name, track_id, designation, department, person_id))
+    """, (name, track_id, designation, department, face_descriptors, person_id))
 
     conn.commit()
     conn.close()
@@ -1021,4 +1180,3 @@ def delete_registered_person(person_id: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-

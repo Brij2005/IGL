@@ -31,6 +31,7 @@ import {
   loadDetectionModel,
   getModelStatus
 } from "../services/realVisionProcessor";
+import { captureFaceDescriptor, FACE_ENROLLMENT_SAMPLE_COUNT } from "../services/faceRecognition";
 
 export default function LiveMonitoringView() {
   const {
@@ -60,7 +61,6 @@ export default function LiveMonitoringView() {
   const [inputMode, setInputMode] = useState("camera");
   const [cameraError, setCameraError] = useState(null);
   const [isConnectingCam, setIsConnectingCam] = useState(false);
-  const [uploadedImageSrc, setUploadedImageSrc] = useState(null);
 
   // Overlay Toggles
   const [showBoxes, setShowBoxes] = useState(true);
@@ -84,9 +84,8 @@ export default function LiveMonitoringView() {
 
   const isDetectingRef = useRef(false);
   const lastInferenceTimeRef = useRef(0);
-  const lastAlertTimeRef = useRef(0);
-
-  // Mobile Phone Misuse Status UI State
+  const phoneAlertCooldownsRef = useRef(new Map());
+  // Approximate candidate: backend cell-phone detection associated with a tracked person.
   const [phoneMetrics, setPhoneMetrics] = useState({
     phoneDetected: false,
     associatedTrackId: null,
@@ -102,7 +101,8 @@ export default function LiveMonitoringView() {
   const [debugData, setDebugData] = useState({
     rawPredictionsCount: 0,
     rawDetectionsSummary: [],
-    phoneCandidates: []
+    phoneCandidates: [],
+    faceRecognitionStatus: { status: "NOT_LOADED", error: "" }
   });
 
   // Configurable Detection Thresholds
@@ -125,21 +125,38 @@ export default function LiveMonitoringView() {
     department: "Refinery Operations"
   });
   const [regSuccessMsg, setRegSuccessMsg] = useState("");
+  const [regErrorMsg, setRegErrorMsg] = useState("");
+  const [registrationFaceDescriptors, setRegistrationFaceDescriptors] = useState([]);
+  const [isCapturingFace, setIsCapturingFace] = useState(false);
+  const [selectedExistingPersonnelId, setSelectedExistingPersonnelId] = useState("");
+  const registrationTargetBoxRef = useRef(null);
 
   const handleOpenRegisterModal = (targetTrackId = null) => {
-    const trackId = targetTrackId || (livePersonsList[0]?.trackId || `TRK-P${Math.floor(Math.random() * 800 + 100)}`);
-    const existing = (registeredPersonnel || []).find((r) => r.track_id === trackId || r.id === trackId);
+    const selectedPerson = livePersonsList.find((person) => person.trackId === targetTrackId)
+      || livePersonsList[0];
+    const trackId = targetTrackId || selectedPerson?.trackId || `TRK-P${Math.floor(Math.random() * 800 + 100)}`;
+    const existing = (registeredPersonnel || []).find(
+      (person) => person.id === selectedPerson?.matchedPersonnelId
+        || person.track_id === trackId
+        || person.id === trackId
+    );
+    registrationTargetBoxRef.current = selectedPerson?.box || null;
 
     if (existing) {
+      setSelectedExistingPersonnelId(existing.id);
       setRegistrationForm({
         id: existing.id,
-        track_id: existing.track_id,
+        track_id: trackId,
         name: existing.name,
         designation: existing.designation || "Registered Worker",
         department: existing.department || "Refinery Operations"
       });
+      setRegistrationFaceDescriptors(existing.face_descriptors || []);
     } else {
-      const suggestedId = trackId.replace("TRK-P", "EMP-");
+      setSelectedExistingPersonnelId("");
+      const suggestedId = trackId.startsWith("TRK-P")
+        ? trackId.replace("TRK-P", "EMP-")
+        : trackId.replace(/^TRK-/, "EMP-");
       setRegistrationForm({
         id: suggestedId,
         track_id: trackId,
@@ -147,28 +164,120 @@ export default function LiveMonitoringView() {
         designation: "Registered Worker",
         department: "Refinery Operations"
       });
+      setRegistrationFaceDescriptors([]);
     }
     setRegSuccessMsg("");
+    setRegErrorMsg("");
     setIsRegisterModalOpen(true);
+  };
+
+  const handleSelectExistingPersonnel = (personId) => {
+    setSelectedExistingPersonnelId(personId);
+    if (!personId) {
+      const trackId = registrationTargetBoxRef.current
+        ? registrationForm.track_id
+        : `TRK-P${Math.floor(Math.random() * 800 + 100)}`;
+      setRegistrationFaceDescriptors([]);
+      setRegistrationForm({
+        id: trackId.startsWith("TRK-P")
+          ? trackId.replace("TRK-P", "EMP-")
+          : trackId.replace(/^TRK-/, "EMP-"),
+        track_id: trackId,
+        name: "",
+        designation: "Registered Worker",
+        department: "Refinery Operations"
+      });
+      return;
+    }
+
+    const person = (registeredPersonnel || []).find((entry) => entry.id === personId);
+    if (!person) {
+      setRegErrorMsg("Selected registered personnel record is no longer available. Refresh and try again.");
+      return;
+    }
+    setRegistrationFaceDescriptors(person.face_descriptors || []);
+    setRegistrationForm((current) => ({
+      id: person.id,
+      track_id: current.track_id || person.track_id || person.id,
+      name: person.name,
+      designation: person.designation || "Registered Worker",
+      department: person.department || "Refinery Operations"
+    }));
+    setRegErrorMsg("");
+  };
+
+  const handleCaptureRegistrationFace = async () => {
+    let selectedPerson = livePersonsList.find(
+      (person) => person.trackId === registrationForm.track_id
+    );
+    if (!selectedPerson && registrationTargetBoxRef.current) {
+      const [targetX, targetY, targetWidth, targetHeight] = registrationTargetBoxRef.current;
+      const targetCenter = [targetX + targetWidth / 2, targetY + targetHeight / 2];
+      selectedPerson = livePersonsList
+        .map((person) => {
+          const [x, y, width, height] = person.box;
+          const center = [x + width / 2, y + height / 2];
+          return {
+            person,
+            distance: Math.hypot(center[0] - targetCenter[0], center[1] - targetCenter[1])
+          };
+        })
+        .filter(({ distance }) => distance <= 0.35)
+        .sort((a, b) => a.distance - b.distance)[0]?.person;
+    }
+    const source = videoRef.current?.readyState >= 2
+      ? videoRef.current
+      : imageRef.current?.complete
+        ? imageRef.current
+        : null;
+    if (!selectedPerson || !source) {
+      setRegErrorMsg("Keep the person in the live frame, then capture the face template.");
+      return;
+    }
+
+    setIsCapturingFace(true);
+    setRegErrorMsg("");
+    try {
+      const descriptor = await captureFaceDescriptor(source, selectedPerson.box);
+      setRegistrationFaceDescriptors((current) => [...current, descriptor].slice(-5));
+      registrationTargetBoxRef.current = selectedPerson.box;
+    } catch (error) {
+      setRegErrorMsg(error.message);
+    } finally {
+      setIsCapturingFace(false);
+    }
   };
 
   const handleSaveRegistration = async (e) => {
     e.preventDefault();
     if (!registrationForm.id || !registrationForm.name) return;
+    const hasCompleteFaceEnrollment =
+      registrationFaceDescriptors.length >= FACE_ENROLLMENT_SAMPLE_COUNT;
+    const hasPartialFaceEnrollment =
+      registrationFaceDescriptors.length > 0 && !hasCompleteFaceEnrollment;
+    try {
+      await registerPerson({
+        id: registrationForm.id,
+        track_id: registrationForm.track_id || registrationForm.id,
+        name: registrationForm.name,
+        designation: registrationForm.designation,
+        department: registrationForm.department,
+        face_descriptors: hasCompleteFaceEnrollment ? registrationFaceDescriptors : []
+      });
 
-    await registerPerson({
-      id: registrationForm.id,
-      track_id: registrationForm.track_id || registrationForm.id,
-      name: registrationForm.name,
-      designation: registrationForm.designation,
-      department: registrationForm.department
-    });
-
-    setRegSuccessMsg(`Successfully registered ${registrationForm.name} (${registrationForm.id}) to database!`);
-    setTimeout(() => {
-      setIsRegisterModalOpen(false);
-      setRegSuccessMsg("");
-    }, 1200);
+      setRegErrorMsg("");
+      setRegSuccessMsg(hasCompleteFaceEnrollment
+        ? `Face identity and personnel profile saved for ${registrationForm.name} (${registrationForm.id}).`
+        : hasPartialFaceEnrollment
+          ? `Personnel profile saved for ${registrationForm.name} (${registrationForm.id}). Face samples were not saved because all ${FACE_ENROLLMENT_SAMPLE_COUNT} are required.`
+          : `Personnel profile saved for ${registrationForm.name} (${registrationForm.id}). Face recognition is pending enrollment.`);
+      setTimeout(() => {
+        setIsRegisterModalOpen(false);
+        setRegSuccessMsg("");
+      }, 1800);
+    } catch (error) {
+      setRegErrorMsg(error.message || "Registration failed. The profile was not saved.");
+    }
   };
 
   // Handle Mode Switch to Live Camera
@@ -196,15 +305,26 @@ export default function LiveMonitoringView() {
     }
   };
 
-  // Handle Image File Upload (JPG, JPEG, PNG)
+  // Handle local image/video uploads without keeping duplicate blob URLs.
   const handleImageUpload = async (e) => {
     const file = e.target.files[0];
     if (file) {
-      setInputMode("image");
       setCameraError(null);
-      const fileUrl = URL.createObjectURL(file);
-      setUploadedImageSrc(fileUrl);
-      await connectImageFile(file);
+      try {
+        if (file.type.startsWith("image/")) {
+          setInputMode("image");
+          await connectImageFile(file);
+        } else if (file.type.startsWith("video/")) {
+          setInputMode("camera");
+          await connectVideoFile(file);
+        } else {
+          setCameraError("Choose a supported JPG, PNG, MP4 or WebM file.");
+        }
+      } catch (error) {
+        setCameraError(error.message || "The selected media could not be loaded.");
+      } finally {
+        e.target.value = "";
+      }
     }
   };
 
@@ -215,13 +335,45 @@ export default function LiveMonitoringView() {
     });
   }, []);
 
-  // Attach Stream to Hidden Video Element
+  // Attach whichever selected source was configured in Camera Setup.
   useEffect(() => {
-    if (videoRef.current && activeStream && activeStream instanceof MediaStream) {
-      videoRef.current.srcObject = activeStream;
-      videoRef.current.play().catch((e) => console.log("Video playback error:", e));
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (activeStream instanceof MediaStream) {
+      if (video.srcObject !== activeStream) {
+        video.pause();
+        video.removeAttribute("src");
+        video.srcObject = activeStream;
+      }
+      if (video.paused) {
+        video.play().catch((error) => {
+          if (error.name !== "AbortError") setCameraError(`Live camera playback failed: ${error.message}`);
+        });
+      }
+    } else if (streamSource?.type === "file" && streamSource.url) {
+      if (video.getAttribute("src") !== streamSource.url) {
+        video.pause();
+        video.srcObject = null;
+        video.src = streamSource.url;
+        video.load();
+      }
+      if (video.paused) {
+        video.play().catch((error) => {
+          if (error.name !== "AbortError") setCameraError(`Uploaded video playback failed: ${error.message}`);
+        });
+      }
+    } else {
+      video.pause();
+      video.srcObject = null;
+      video.removeAttribute("src");
     }
-  }, [activeStream]);
+  }, [activeStream, streamSource]);
+
+  useEffect(() => {
+    if (streamSource?.type === "image") setInputMode("image");
+    else if (streamSource) setInputMode("camera");
+  }, [streamSource]);
 
   // Main Render Loop (60 FPS) + Throttled Concurrency-Safe AI Inference (~150ms)
   useEffect(() => {
@@ -233,7 +385,8 @@ export default function LiveMonitoringView() {
       const img = imageRef.current;
 
       const isImageSource = streamSource?.type === "image" && img && (img.complete || img.naturalWidth > 0);
-      const isVideoSource = video && (video.readyState >= 2 || video.videoWidth > 0);
+      const isVideoType = streamSource?.type === "webcam" || streamSource?.type === "file";
+      const isVideoSource = isVideoType && video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
       const sourceElem = isImageSource ? img : isVideoSource ? video : null;
 
       // Verify source & canvas availability
@@ -296,11 +449,11 @@ export default function LiveMonitoringView() {
 
         // 2. Trigger Safe Async TensorFlow Object Detection (Every ~150ms)
         const now = Date.now();
-        if (showBoxes && !isDetectingRef.current && now - lastInferenceTimeRef.current >= 150) {
+        if (!isDetectingRef.current && now - lastInferenceTimeRef.current >= 150) {
           isDetectingRef.current = true;
           lastInferenceTimeRef.current = now;
 
-          detectObjectsAndMobilePhone(sourceElem, config)
+          detectObjectsAndMobilePhone(sourceElem, { ...config, registeredPersonnel })
             .then((result) => {
               detectionsRef.current = result;
 
@@ -308,8 +461,10 @@ export default function LiveMonitoringView() {
               setDebugData({
                 rawPredictionsCount: result.rawPredictionsCount || 0,
                 rawDetectionsSummary: result.rawDetectionsSummary || [],
-                phoneCandidates: result.phoneCandidates || []
+                phoneCandidates: result.phoneCandidates || [],
+                faceRecognitionStatus: result.faceRecognitionStatus || { status: "NOT_LOADED", error: "" }
               });
+              setModelInfo(getModelStatus());
 
               // Synchronize live persons list for quick registration cards
               setLivePersonsList(result.persons || []);
@@ -319,44 +474,45 @@ export default function LiveMonitoringView() {
                 setPersonCount(result.personCount);
               }
 
-              // Update Phone Misuse Status Panel State
-              if (result.phoneMisuseEvent) {
-                setPhoneMetrics(result.phoneMisuseEvent);
+              const detectedPhones = result.phones || [];
+              const nearestPhone = detectedPhones[0];
+              const potentialUse = result.phoneMisuseEvent;
+              setPhoneMetrics({
+                phoneDetected: detectedPhones.length > 0,
+                associatedTrackId: potentialUse?.associatedTrackId || nearestPhone?.associatedTrackId || null,
+                personConfidence: 0,
+                phoneConfidence: potentialUse?.phoneConfidence || nearestPhone?.confidence || 0,
+                durationSec: 0,
+                warningLevel: potentialUse ? 1 : 0,
+                sirenActive: false,
+                warningMessage:
+                  potentialUse?.warningMessage ||
+                  (detectedPhones.length > 0
+                    ? "Cell phone object detected, but no tracked person is near it."
+                    : "No cell phone object detected.")
+              });
 
-                if (
-                  result.phoneMisuseEvent.warningLevel >= 1 &&
-                  now - lastAlertTimeRef.current > 6000
-                ) {
-                  lastAlertTimeRef.current = now;
-                  const base64Snap = captureCanvasSnapshot(canvas, "MOBILE PHONE MISUSE DETECTED");
+              if (potentialUse?.associatedTrackId) {
+                const lastAlertAt = phoneAlertCooldownsRef.current.get(potentialUse.associatedTrackId) || 0;
+                if (now - lastAlertAt >= 30_000) {
+                  phoneAlertCooldownsRef.current.set(potentialUse.associatedTrackId, now);
+                  for (const [trackId, alertAt] of phoneAlertCooldownsRef.current) {
+                    if (now - alertAt > 10 * 60_000) phoneAlertCooldownsRef.current.delete(trackId);
+                  }
                   dispatchAlert({
-                    event_type: "MOBILE_PHONE_USAGE",
+                    event_type: "POTENTIAL_PHONE_USE",
                     zone_name: streamSource?.name || "Plant Monitoring Zone",
-                    severity: result.phoneMisuseEvent.sirenActive ? "CRITICAL" : "HIGH",
-                    confidence: result.phoneMisuseEvent.phoneConfidence || 0.88,
-                    evidence_image_base64: base64Snap,
+                    severity: "MEDIUM",
+                    confidence: potentialUse.phoneConfidence,
+                    evidence_image_base64: captureCanvasSnapshot(canvas, "POTENTIAL PHONE USE — VERIFY"),
                     metadata: {
-                      track_id: result.phoneMisuseEvent.associatedTrackId,
-                      duration_sec: result.phoneMisuseEvent.durationSec,
-                      warning_count: result.phoneMisuseEvent.warningLevel,
-                      siren_status: result.phoneMisuseEvent.sirenActive ? "ON" : "OFF"
+                      track_id: potentialUse.associatedTrackId,
+                      detection_basis: "COCO cell-phone object detected near tracked person",
+                      verified_use: false,
+                      operator_action: "Verify manually; phone-in-hand or active call is not confirmed by this model."
                     }
                   });
                 }
-              } else {
-                setPhoneMetrics({
-                  phoneDetected: false,
-                  associatedTrackId: null,
-                  personConfidence: 0,
-                  phoneConfidence: 0,
-                  durationSec: 0,
-                  warningLevel: 0,
-                  sirenActive: false,
-                  warningMessage:
-                    result.personCount > 0
-                      ? "Monitoring active. No phone usage detected."
-                      : "No persons detected in frame."
-                });
               }
             })
             .catch((err) => {
@@ -383,7 +539,9 @@ export default function LiveMonitoringView() {
 
             // Lookup registered identity by track_id or id
             const regPerson = (registeredPersonnel || []).find(
-              (r) => r.track_id === pObj.trackId || r.id === pObj.trackId
+              (r) => r.id === pObj.matchedPersonnelId
+                || r.track_id === pObj.trackId
+                || r.id === pObj.trackId
             );
 
             const boxColor = pObj.isUsingPhone
@@ -398,10 +556,12 @@ export default function LiveMonitoringView() {
 
             const identityText = regPerson ? `${regPerson.id} | ${regPerson.name}` : pObj.trackId;
             const statusText = pObj.isUsingPhone
-              ? "[PHONE DETECTED]"
+              ? "[PHONE NEAR PERSON — VERIFY]"
+              : pObj.hasHelmet === null
+              ? "[HELMET STATUS UNAVAILABLE]"
               : pObj.hasHelmet
-              ? "[Helmet OK]"
-              : "[NO HELMET]";
+                ? "[HELMET OK]"
+                : "[NO HELMET]";
 
             const tagText = `${identityText} ${statusText}`;
 
@@ -409,6 +569,8 @@ export default function LiveMonitoringView() {
               ? "rgba(245, 158, 11, 0.95)"
               : regPerson
               ? "rgba(2, 132, 199, 0.95)"
+              : pObj.hasHelmet === null
+              ? "rgba(100, 116, 139, 0.95)"
               : pObj.hasHelmet
               ? "rgba(16, 185, 129, 0.9)"
               : "rgba(239, 68, 68, 0.95)";
@@ -423,7 +585,7 @@ export default function LiveMonitoringView() {
             drawnPersonBoxes.push({ trackId: pObj.trackId, px, py, pw, ph, center: [px + pw / 2, py + ph / 2] });
           }
 
-          // Draw Associated Phone Bounding Boxes (YOLO26 Phone-in-Hand Detector)
+          // Draw phone bounding boxes returned by backend inference.
           for (let j = 0; j < activePhones.length; j++) {
             const phObj = activePhones[j];
             const phBox = phObj.box;
@@ -436,7 +598,7 @@ export default function LiveMonitoringView() {
             ctx.strokeRect(phx, phy, phw, phh);
             ctx.setLineDash([]);
 
-            const phoneTag = `${phObj.class || "Phone in Hand"} (${Math.round((phObj.confidence || 0.85) * 100)}%)`;
+            const phoneTag = `${phObj.class || "Cell phone"} (${Math.round((phObj.confidence || 0) * 100)}%)`;
             const tagW = Math.max(130, phoneTag.length * 7.5);
 
             ctx.fillStyle = "rgba(6, 182, 212, 0.95)";
@@ -473,20 +635,20 @@ export default function LiveMonitoringView() {
     }
 
     return () => cancelAnimationFrame(animId);
-  }, [streamSource, showBoxes, showZones, showDistances, isMirrored, restrictedZones, personCount, config]);
+  }, [streamSource, showBoxes, showZones, showDistances, isMirrored, restrictedZones, personCount, config, registeredPersonnel]);
 
-  // Capture Canvas Snapshot and Dispatch Manual Incident Alert
+  // Capture evidence for manual review without asserting an unverified PPE violation.
   const handleCaptureEvidenceAlert = () => {
     const canvas = canvasRef.current;
-    const base64Snap = captureCanvasSnapshot(canvas, "SAFETY INCIDENT EVIDENCE");
+    const base64Snap = captureCanvasSnapshot(canvas, "MANUAL SAFETY REVIEW");
 
     dispatchAlert({
-      event_type: "PPE_VIOLATION",
+      event_type: "MANUAL_REVIEW",
       zone_name: streamSource?.name || "Refinery Area",
-      severity: "HIGH",
-      confidence: 0.95,
+      severity: "MEDIUM",
+      confidence: 0,
       evidence_image_base64: base64Snap,
-      metadata: { missing_items: ["Safety Helmet"], track_id: "Worker #104" }
+      metadata: { source: "operator_submitted", review_required: true }
     });
   };
 
@@ -500,11 +662,11 @@ export default function LiveMonitoringView() {
             Live AI Inspection & Object Detection
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Real-time computer vision inference powered by TensorFlow.js COCO-SSD detection.
+            Live person tracking with backend YOLOv8 COCO cell-phone detection.
           </p>
         </div>
 
-        {/* Dual Input Mode Controls: [ Live Camera ] [ Upload Image ] */}
+        {/* Dual Input Mode Controls: [ Live Camera ] [ Upload Media ] */}
         <div className="flex flex-wrap items-center gap-2 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 text-xs">
           <button
             onClick={handleSelectLiveCamera}
@@ -527,10 +689,10 @@ export default function LiveMonitoringView() {
             }`}
           >
             <Upload className="w-4 h-4" />
-            <span>Upload Image</span>
+            <span>Upload Image / Video</span>
             <input
               type="file"
-              accept="image/jpeg,image/png,image/jpg"
+              accept="image/jpeg,image/png,image/jpg,video/mp4,video/webm"
               onChange={handleImageUpload}
               className="hidden"
             />
@@ -538,23 +700,29 @@ export default function LiveMonitoringView() {
         </div>
       </div>
 
-      {/* Permission Denied Alert & Enable Camera Button */}
-      {inputMode === "camera" && cameraError && (
-        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center justify-between gap-4 shadow-lg">
+      {/* Clearly show when live inference has no camera frames to process. */}
+      {inputMode === "camera" && (!streamSource || cameraError) && (
+        <div className={`p-4 rounded-2xl text-xs flex items-center justify-between gap-4 shadow-lg ${
+          cameraError
+            ? "bg-red-500/10 border border-red-500/30 text-red-400"
+            : "bg-amber-500/10 border border-amber-500/30 text-amber-300"
+        }`}>
           <div className="flex items-center gap-3">
             <AlertCircle className="w-5 h-5 shrink-0" />
             <div>
-              <strong className="block font-bold">Camera Permission Required:</strong>
-              <span>{cameraError}</span>
+              <strong className="block font-bold">
+                {cameraError ? "Camera Permission Required:" : "No live camera connected — detection is paused."}
+              </strong>
+              <span>{cameraError || "Start the camera or upload an image/video to run detection."}</span>
             </div>
           </div>
           <button
             onClick={handleEnableCameraClick}
             disabled={isConnectingCam}
-            className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition shadow-lg shrink-0 flex items-center gap-1.5"
+            className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition shadow-lg shrink-0 flex items-center gap-1.5"
           >
             {isConnectingCam ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
-            <span>Enable Camera</span>
+            <span>{cameraError ? "Retry Camera" : "Enable Camera"}</span>
           </button>
         </div>
       )}
@@ -625,14 +793,29 @@ export default function LiveMonitoringView() {
             </span>
           </div>
 
-          <div className="text-[11px] text-slate-500 font-medium flex items-center gap-1.5">
-            <Users className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Strict TensorFlow.js COCO-SSD Inference • Zero heuristic fallbacks</span>
+          <div className="text-[11px] text-slate-500 font-medium space-y-1">
+            <div className="flex items-center gap-1.5">
+              <Users className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Person tracking • Backend YOLOv8 phone detection • Approximate warnings only</span>
+            </div>
+            <div className={`text-[10px] ${
+              modelInfo.status === "ERROR" || debugData.faceRecognitionStatus.status === "ERROR"
+                ? "text-red-600"
+                : "text-sky-700"
+            }`}>
+              {modelInfo.status === "ERROR"
+                ? modelInfo.errorMessage || "Person detection model failed to load."
+                : debugData.faceRecognitionStatus.status === "ERROR"
+                ? debugData.faceRecognitionStatus.error
+                : registeredPersonnel.some((person) => person.face_descriptors?.length)
+                  ? `Registered face matching: ${debugData.faceRecognitionStatus.status}`
+                  : "Registered face matching: enroll a face template during registration"}
+            </div>
           </div>
         </div>
       )}
 
-      {/* Mobile Phone Misuse Detection Status Panel */}
+      {/* Cell-phone object detection status panel */}
       <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 text-slate-100 space-y-4 shadow-xl">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
@@ -647,25 +830,25 @@ export default function LiveMonitoringView() {
             </div>
             <div>
               <h2 className="text-sm font-bold text-slate-100">
-                Mobile Phone Misuse Detection Status
+                Potential Phone Use (Approximate)
               </h2>
               <p className="text-[11px] text-slate-400">
-                Continuous AI tracking, warning escalation & audible siren engine
+                Real cell-phone detections near people create a potential-use warning for manual verification.
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Requirement 9 & 10: Status "Phone Detector: YOLO26 | ACTIVE / OFFLINE" */}
+            {/* Show backend inference status without implying a custom trained phone model. */}
             <span
               className={`px-3 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
-                detectionsRef.current?.phoneDetectorIsActive !== false
+                detectionsRef.current?.phoneDetectorIsActive === true
                   ? "bg-cyan-500/10 text-cyan-400 border-cyan-500/30"
                   : "bg-red-500/20 text-red-400 border-red-500/40"
               }`}
             >
               <Smartphone className="w-3.5 h-3.5" />
-              <span>{detectionsRef.current?.phoneDetectorStatus || "Phone Detector: YOLO26 | ACTIVE"}</span>
+              <span>{detectionsRef.current?.phoneDetectorStatus || "Phone detector: waiting for backend inference"}</span>
             </span>
 
             <span
@@ -677,20 +860,15 @@ export default function LiveMonitoringView() {
                   : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
               }`}
             >
-              {phoneMetrics.sirenActive ? (
-                <>
-                  <Volume2 className="w-3.5 h-3.5 text-red-400 animate-bounce" />
-                  <span>SIREN ACTIVE (WARNING 3 REACHED)</span>
-                </>
-              ) : phoneMetrics.phoneDetected ? (
+              {phoneMetrics.phoneDetected ? (
                 <>
                   <AlertOctagon className="w-3.5 h-3.5 text-amber-400" />
-                  <span>PHONE MISUSE DETECTED</span>
+                  <span>POTENTIAL PHONE USE — VERIFY</span>
                 </>
               ) : (
                 <>
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>NORMAL — NO MISUSE</span>
+                  <span>NO CELL PHONE OBJECT DETECTED</span>
                 </>
               )}
             </span>
@@ -707,118 +885,30 @@ export default function LiveMonitoringView() {
           </div>
 
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-[10px] text-slate-400 uppercase font-semibold">Associated Person</span>
+            <span className="text-[10px] text-slate-400 uppercase font-semibold">Nearby Person</span>
             <div className="mt-1 text-sm font-bold font-mono text-cyan-400">
               {phoneMetrics.associatedTrackId || "None"}
             </div>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-[10px] text-slate-400 uppercase font-semibold">Detection Conf.</span>
+            <span className="text-[10px] text-slate-400 uppercase font-semibold">Object Confidence</span>
             <div className="mt-1 text-sm font-bold text-slate-200">
               {phoneMetrics.phoneConfidence > 0 ? `${Math.round(phoneMetrics.phoneConfidence * 100)}%` : "N/A"}
             </div>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-[10px] text-slate-400 uppercase font-semibold">Continuous Duration</span>
-            <div className="mt-1 text-sm font-bold font-mono text-emerald-400">
-              {phoneMetrics.durationSec > 0 ? `${phoneMetrics.durationSec.toFixed(1)}s` : "0.0s"}
-            </div>
-          </div>
-
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-[10px] text-slate-400 uppercase font-semibold">Warning Level</span>
-            <div className={`mt-1 text-sm font-bold ${phoneMetrics.warningLevel > 0 ? "text-red-400" : "text-slate-300"}`}>
-              {phoneMetrics.warningLevel} / {config.maxWarnings}
-            </div>
-          </div>
-
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-[10px] text-slate-400 uppercase font-semibold">Siren Alarm</span>
-            <div className={`mt-1 text-sm font-bold ${phoneMetrics.sirenActive ? "text-red-400 animate-pulse" : "text-slate-400"}`}>
-              {phoneMetrics.sirenActive ? "ON" : "OFF"}
+            <span className="text-[10px] text-slate-400 uppercase font-semibold">Potential Use</span>
+            <div className="mt-1 text-sm font-bold text-amber-300">
+              {phoneMetrics.associatedTrackId ? "VERIFY" : "NO MATCH"}
             </div>
           </div>
         </div>
 
-        {/* Status Message Banner */}
-        {phoneMetrics.warningMessage && (
-          <div
-            className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
-              phoneMetrics.sirenActive
-                ? "bg-red-500/20 border-red-500/40 text-red-300"
-                : phoneMetrics.phoneDetected
-                ? "bg-amber-500/20 border-amber-500/30 text-amber-300"
-                : "bg-slate-800/80 border-slate-700 text-slate-300"
-            }`}
-          >
-            <AlertOctagon className="w-4 h-4 shrink-0 text-amber-400" />
-            <span>{phoneMetrics.warningMessage}</span>
-          </div>
-        )}
-
-        {/* Threshold Sliders & Controls */}
-        <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400">
-          <div className="flex items-center gap-2 font-bold text-slate-300">
-            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-            <span>AI Verification Configuration:</span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-4 text-[11px]">
-            <label className="flex items-center gap-2">
-              <span>Min Duration:</span>
-              <input
-                type="number"
-                step="0.5"
-                min="1.0"
-                max="10.0"
-                value={config.minDurationSec}
-                onChange={(e) => setConfig({ ...config, minDurationSec: parseFloat(e.target.value) || 2.0 })}
-                className="w-16 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-100 font-mono"
-              />
-              <span>sec</span>
-            </label>
-
-            <label className="flex items-center gap-2">
-              <span>Min Confidence:</span>
-              <input
-                type="number"
-                step="0.05"
-                min="0.2"
-                max="0.9"
-                value={config.minConfidence}
-                onChange={(e) => setConfig({ ...config, minConfidence: parseFloat(e.target.value) || 0.35 })}
-                className="w-16 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-100 font-mono"
-              />
-            </label>
-
-            <label className="flex items-center gap-2">
-              <span>Phone Threshold:</span>
-              <input
-                type="number"
-                step="0.05"
-                min="0.10"
-                max="0.50"
-                value={config.phoneThreshold}
-                onChange={(e) => setConfig({ ...config, phoneThreshold: parseFloat(e.target.value) || 0.15 })}
-                className="w-16 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-100 font-mono"
-              />
-            </label>
-
-            <label className="flex items-center gap-2">
-              <span>Max Warnings:</span>
-              <input
-                type="number"
-                min="1"
-                max="5"
-                value={config.maxWarnings}
-                onChange={(e) => setConfig({ ...config, maxWarnings: parseInt(e.target.value) || 3 })}
-                className="w-14 px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-100 font-mono"
-              />
-            </label>
-          </div>
-        </div>
+        <p className="text-xs text-amber-300">
+          Warning basis: a detected cell phone near a tracked person. It may be a false alarm; hand-held use or an active call is not confirmed. Verify before acting.
+        </p>
       </div>
 
       {/* AI Model Inspector / Debug Overlay UI Card */}
@@ -878,14 +968,18 @@ export default function LiveMonitoringView() {
             </div>
           </div>
 
-          {/* Col 3: Phone Misuse Status */}
+          {/* Col 3: Phone-use classification status */}
           <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
             <span className="text-slate-400 font-semibold flex items-center gap-1">
               <ShieldCheck className="w-3 h-3 text-emerald-400" />
-              Phone Misuse Status:
+              Potential phone-use warning:
             </span>
             <p className={`font-bold text-sm ${phoneMetrics.phoneDetected ? "text-amber-400" : "text-slate-300"}`}>
-              {phoneMetrics.phoneDetected ? "PHONE MISUSE DETECTED" : "No AI phone detection"}
+              {phoneMetrics.associatedTrackId
+                ? "Phone detected near person — verify manually"
+                : phoneMetrics.phoneDetected
+                  ? "Phone detected — no nearby person matched"
+                  : "No cell phone object detected"}
             </p>
             <div className="text-[10px] text-slate-400 space-y-0.5 pt-1">
               <div>Assoc. Person: <span className="text-cyan-400">{phoneMetrics.associatedTrackId || "None"}</span></div>
@@ -900,11 +994,11 @@ export default function LiveMonitoringView() {
         <div className="relative rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex items-center justify-center">
           {/* Hidden HTML5 Video & Image Sources */}
           <video ref={videoRef} autoPlay playsInline muted className="hidden" />
-          {uploadedImageSrc && (
+          {streamSource?.type === "image" && (
             <img
               ref={imageRef}
-              src={uploadedImageSrc}
-              alt="Uploaded source"
+              src={streamSource.url}
+              alt={streamSource.name}
               className="hidden"
               crossOrigin="anonymous"
             />
@@ -960,7 +1054,7 @@ export default function LiveMonitoringView() {
               className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition shadow-lg shadow-red-500/20 flex items-center gap-2"
             >
               <ShieldAlert className="w-4 h-4" />
-              <span>Capture Photo & Trigger Alert</span>
+              <span>Capture Photo for Manual Review</span>
             </button>
           </div>
         )}
@@ -1002,7 +1096,9 @@ export default function LiveMonitoringView() {
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {livePersonsList.map((p) => {
               const reg = (registeredPersonnel || []).find(
-                (r) => r.track_id === p.trackId || r.id === p.trackId
+                (r) => r.id === p.matchedPersonnelId
+                  || r.track_id === p.trackId
+                  || r.id === p.trackId
               );
               return (
                 <div
@@ -1047,10 +1143,18 @@ export default function LiveMonitoringView() {
                       <span className="text-slate-400">Helmet Status:</span>
                       <span
                         className={`font-semibold ${
-                          p.hasHelmet ? "text-emerald-400" : "text-red-400"
+                          p.hasHelmet === null
+                            ? "text-slate-400"
+                            : p.hasHelmet
+                              ? "text-emerald-400"
+                              : "text-red-400"
                         }`}
                       >
-                        {p.hasHelmet ? "✅ Helmet OK" : "❌ No Helmet"}
+                        {p.hasHelmet === null
+                          ? "Helmet status unavailable"
+                          : p.hasHelmet
+                            ? "✅ Helmet OK"
+                            : "❌ No Helmet"}
                       </span>
                     </div>
                   </div>
@@ -1085,21 +1189,21 @@ export default function LiveMonitoringView() {
       <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-4 text-xs text-slate-700">
         <div className="flex items-center gap-2 font-bold text-sm text-slate-900">
           <Info className="w-5 h-5 text-sky-600" />
-          <span>Technical Architecture — Mobile Phone Misuse & AI Pipeline</span>
+          <span>Technical Architecture — Cell Phone Object Detection</span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
             <div className="font-bold text-slate-900 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>1. TensorFlow.js Object Detection & Zero-Fallback Rule:</span>
+              <span>1. Live Camera Object Detection:</span>
             </div>
             <ul className="list-disc pl-5 space-y-1 text-slate-600 font-medium">
               <li>
-                <strong>Model Engine:</strong> TensorFlow.js COCO-SSD (MobileNetV2 architecture).
+                <strong>Person tracking:</strong> Browser-based person detection from the active camera feed.
               </li>
               <li>
-                <strong>Zero Persons Rule:</strong> Frame me person na hone par count strictly 0 rehta hai.
+                <strong>Phone detection:</strong> Backend YOLOv8 COCO model reports the <code>cell phone</code> class.
               </li>
               <li>
                 <strong>Phone Model:</strong> COCO class <code>cell phone</code> with normalized spatial bboxes.
@@ -1114,13 +1218,13 @@ export default function LiveMonitoringView() {
             </div>
             <ul className="list-disc pl-5 space-y-1 text-slate-600 font-medium">
               <li>
-                <strong>Safe Concurrency:</strong> Async TensorFlow inference runs every ~150ms with a non-overlapping lock.
+                <strong>Camera requirement:</strong> Detection runs only while a live camera frame is available.
               </li>
               <li>
-                <strong>Spatial Association:</strong> Detected phone center + person interaction ROI check.
+                <strong>Spatial association:</strong> Nearby phone/person detections trigger a potential-use warning for review.
               </li>
               <li>
-                <strong>Warning System:</strong> Warning 1 $\rightarrow$ 2 $\rightarrow$ 3 $\rightarrow$ Audible Web Audio Siren.
+                <strong>Verification:</strong> Proximity does not confirm hand-held use or an active call; verify before acting.
               </li>
             </ul>
           </div>
@@ -1138,7 +1242,7 @@ export default function LiveMonitoringView() {
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-slate-100">Register Personnel Identity</h3>
-                  <p className="text-[11px] text-slate-400">Save unique ID and name to SQLite database</p>
+                  <p className="text-[11px] text-slate-400">Enroll face templates locally for later recognition</p>
                 </div>
               </div>
               <button
@@ -1156,7 +1260,57 @@ export default function LiveMonitoringView() {
               </div>
             )}
 
+            {regErrorMsg && (
+              <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-300 rounded-xl text-xs flex items-center gap-2 font-semibold">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{regErrorMsg}</span>
+              </div>
+            )}
+
+            <div className="p-3 bg-sky-500/10 border border-sky-500/20 rounded-xl space-y-2">
+              <p className="text-[11px] text-slate-300">
+                Save the personnel profile now, or capture {FACE_ENROLLMENT_SAMPLE_COUNT} clear samples of the same person's face
+                (front, slight left, slight right) to enable recognition. Face templates and profile details are saved in local SQLite;
+                camera images are not stored for recognition.
+              </p>
+              <div className="flex items-center justify-between gap-2">
+                <span className={`text-xs font-semibold ${
+                  registrationFaceDescriptors.length >= FACE_ENROLLMENT_SAMPLE_COUNT
+                    ? "text-emerald-300"
+                    : "text-amber-300"
+                }`}>
+                  {registrationFaceDescriptors.length}/{FACE_ENROLLMENT_SAMPLE_COUNT} face samples
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCaptureRegistrationFace}
+                  disabled={isCapturingFace || registrationFaceDescriptors.length >= 5}
+                  className="px-3 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold"
+                >
+                  {isCapturingFace ? "Capturing..." : "Capture Face Sample"}
+                </button>
+              </div>
+            </div>
+
             <form onSubmit={handleSaveRegistration} className="space-y-4 text-xs">
+              {registeredPersonnel.length > 0 && (
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Personnel record</label>
+                  <select
+                    value={selectedExistingPersonnelId}
+                    onChange={(event) => handleSelectExistingPersonnel(event.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="">Create a new personnel record</option>
+                    {registeredPersonnel.map((person) => (
+                      <option key={person.id} value={person.id}>
+                        {person.id} — {person.name} {person.face_descriptors?.length ? "(face enrolled)" : "(face not enrolled)"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <div>
                 <label className="block text-slate-300 font-semibold mb-1">Live Track ID</label>
                 <input

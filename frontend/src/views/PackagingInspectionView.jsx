@@ -11,12 +11,7 @@ import {
   Gauge,
   Cpu,
   Video,
-  Sliders,
-  RefreshCw,
-  Info,
-  ShieldCheck,
-  Search,
-  Filter
+  Info
 } from "lucide-react";
 import {
   getInitialPackagingState,
@@ -111,7 +106,7 @@ export default function PackagingInspectionView() {
   const displayBottle = selectedLogBottle || state.activeBottle;
   const qualityRate = state.totalInspected > 0
     ? Math.round((state.totalPassed / state.totalInspected) * 1000) / 10
-    : 100;
+    : null;
 
   // Filter log entries
   const filteredLogs = state.recentLogs.filter((item) => {
@@ -131,13 +126,13 @@ export default function PackagingInspectionView() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
-                Packaging Quality Inspection Line
+                Packaging Quality Inspection Demo
                 <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-cyan-100 text-cyan-800 border border-cyan-300">
-                  CONVEYOR VISION AI
+                  DEMO / SIMULATED
                 </span>
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Automated 3D fill-level, cap integrity, and surface defect inspection on high-speed bottle conveyor.
+                Sample UI only. No live packaging camera, trained inspection model, conveyor, or ejector is connected.
               </p>
             </div>
           </div>
@@ -146,8 +141,8 @@ export default function PackagingInspectionView() {
         {/* Prototype & Controls Header */}
         <div className="flex flex-wrap items-center gap-3 text-xs">
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-            <span>CONVEYOR: <strong className="text-emerald-400">{isPaused ? "PAUSED" : "RUNNING"}</strong></span>
+            <span className="w-2 h-2 rounded-full bg-amber-400" />
+            <span>DEMO SIMULATION: <strong className="text-amber-300">{isPaused ? "PAUSED" : "RUNNING"}</strong></span>
           </div>
 
           <button
@@ -172,20 +167,20 @@ export default function PackagingInspectionView() {
         </div>
       </div>
 
-      {/* Hardware Connection & Prototype Status Banner */}
+      {/* Simulation status; no hardware or inspection model is connected. */}
       <div className="p-3.5 rounded-xl bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-indigo-500/30 flex items-center justify-between text-xs text-slate-300">
         <div className="flex items-center gap-3">
           <Info className="w-4 h-4 text-cyan-400 shrink-0" />
           <span>
-            <strong className="text-cyan-300 font-semibold">Modular Vision Pipeline Ready:</strong> Simulated high-speed conveyor stream active. Connect real 3D Depth camera or TensorRT bottle model seamlessly via <code className="text-cyan-300 bg-slate-950 px-1.5 py-0.5 rounded">packagingProcessor.js</code> API.
+            <strong className="text-amber-300 font-semibold">DEMO ONLY — NO REAL INSPECTION:</strong> These bottle results are randomly generated for UI demonstration. No camera, 3D depth sensor, trained model, conveyor, or reject actuator is connected.
           </span>
         </div>
         <div className="hidden sm:flex items-center gap-3 text-[11px] font-mono text-slate-400">
           <span className="flex items-center gap-1">
-            <Video className="w-3.5 h-3.5 text-emerald-400" /> 3D-DEPTH: READY
+            <Video className="w-3.5 h-3.5 text-amber-400" /> CAMERA: NOT CONNECTED
           </span>
           <span className="flex items-center gap-1">
-            <Cpu className="w-3.5 h-3.5 text-cyan-400" /> INFERENCE: 60 FPS
+            <Cpu className="w-3.5 h-3.5 text-amber-400" /> INSPECTION MODEL: NONE
           </span>
         </div>
       </div>
@@ -199,7 +194,7 @@ export default function PackagingInspectionView() {
             <Boxes className="w-4 h-4 text-slate-400" />
           </div>
           <div className="text-2xl font-bold text-slate-900">{state.totalInspected}</div>
-          <p className="text-[11px] text-slate-400">Bottles processed through AI scanner</p>
+          <p className="text-[11px] text-slate-400">Simulated samples only — not inspected bottles</p>
         </div>
 
         {/* Passed */}
@@ -209,7 +204,7 @@ export default function PackagingInspectionView() {
             <CheckCircle2 className="w-4 h-4 text-emerald-500" />
           </div>
           <div className="text-2xl font-bold text-emerald-600">{state.totalPassed}</div>
-          <p className="text-[11px] text-emerald-600 font-medium">Verified 100% Quality Pass</p>
+          <p className="text-[11px] text-emerald-600 font-medium">Demo calculation only — not verified quality</p>
         </div>
 
         {/* Defective */}
@@ -219,7 +214,7 @@ export default function PackagingInspectionView() {
             <XCircle className="w-4 h-4 text-red-500" />
           </div>
           <div className="text-2xl font-bold text-red-600">{state.totalDefective}</div>
-          <p className="text-[11px] text-red-500 font-medium">Automated Air-Jet Ejected</p>
+          <p className="text-[11px] text-red-500 font-medium">Simulated reject — no physical ejection</p>
         </div>
 
         {/* Quality Rate */}
@@ -229,15 +224,21 @@ export default function PackagingInspectionView() {
             <Activity className="w-4 h-4 text-cyan-600" />
           </div>
           <div className="text-2xl font-bold text-slate-900 flex items-baseline gap-1">
-            <span>{qualityRate}%</span>
-            <span className="text-xs text-emerald-600 font-semibold">Target &gt;95%</span>
+            <span>{qualityRate === null ? "—" : `${qualityRate}%`}</span>
+            <span className="text-xs text-amber-600 font-semibold">Demo only</span>
           </div>
           <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
             <div
               className={`h-full transition-all duration-500 ${
-                qualityRate >= 95 ? "bg-emerald-500" : qualityRate >= 90 ? "bg-amber-500" : "bg-red-500"
+                qualityRate === null
+                  ? "bg-slate-300"
+                  : qualityRate >= 95
+                    ? "bg-emerald-500"
+                    : qualityRate >= 90
+                      ? "bg-amber-500"
+                      : "bg-red-500"
               }`}
-              style={{ width: `${qualityRate}%` }}
+              style={{ width: `${qualityRate ?? 0}%` }}
             />
           </div>
         </div>
@@ -250,10 +251,10 @@ export default function PackagingInspectionView() {
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
               <Video className="w-4 h-4 text-cyan-400" />
-              Conveyor Inspection Camera Viewport (CAM-PACK-01)
+              Simulated Conveyor View (No Camera Connected)
             </h2>
             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-cyan-400 border border-slate-700">
-              1920x1080 @ 60FPS
+              DEMO GRAPHIC — NO CAMERA FEED
             </span>
           </div>
 
@@ -269,17 +270,17 @@ export default function PackagingInspectionView() {
             {/* Inspection Zone Laser Beam Scanner overlay */}
             <div className="absolute left-1/2 top-0 bottom-0 w-24 -translate-x-1/2 bg-cyan-500/10 border-x border-cyan-400/40 pointer-events-none flex flex-col justify-between items-center py-2">
               <div className="px-2 py-0.5 rounded bg-cyan-500/30 text-cyan-300 text-[9px] font-mono font-bold tracking-widest border border-cyan-400/50 uppercase">
-                AI SCAN ZONE
+                DEMO SCAN ZONE
               </div>
               <div className="w-full h-0.5 bg-cyan-400 shadow-[0_0_12px_#06b6d4] animate-pulse" />
-              <div className="text-[9px] font-mono text-cyan-400/80">3D LASER ACTIVE</div>
+              <div className="text-[9px] font-mono text-amber-400/80">SIMULATED SCANNER</div>
             </div>
 
             {/* Top Viewport Metadata Overlay */}
             <div className="relative z-10 flex items-center justify-between text-[11px] font-mono text-slate-400">
               <div className="flex items-center gap-2 bg-slate-900/80 backdrop-blur px-2.5 py-1 rounded-lg border border-slate-800">
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-slate-200">LIVE FEED</span>
+                <span className="text-amber-300">DEMO ANIMATION — NOT LIVE</span>
               </div>
               <div className="bg-slate-900/80 backdrop-blur px-2.5 py-1 rounded-lg border border-slate-800">
                 ZONE: PACKAGING BAY 4
@@ -293,13 +294,15 @@ export default function PackagingInspectionView() {
             >
               {/* Live Bounding Box Tag */}
               <div className="mb-2 px-2 py-1 rounded bg-slate-900/90 border border-cyan-500/80 text-[10px] font-mono text-cyan-300 shadow-lg whitespace-nowrap flex items-center gap-1.5">
-                <span>{state.activeBottle?.id || "BTL-9841"}</span>
+                <span>{state.activeBottle?.id || "DEMO — NO SAMPLE"}</span>
                 <span className={`px-1 rounded font-bold ${
                   state.activeBottle?.overallResult === OVERALL_RESULT.PASS
                     ? "bg-emerald-500/30 text-emerald-400"
-                    : "bg-red-500/30 text-red-400"
+                    : state.activeBottle?.overallResult === OVERALL_RESULT.REJECT
+                      ? "bg-red-500/30 text-red-400"
+                      : "bg-slate-500/30 text-slate-300"
                 }`}>
-                  {state.activeBottle?.overallResult || "SCANNING"}
+                  {state.activeBottle?.overallResult || "WAITING"}
                 </span>
               </div>
 
@@ -345,7 +348,7 @@ export default function PackagingInspectionView() {
 
             {/* Bottom Controls inside Viewport */}
             <div className="relative z-10 flex items-center justify-between text-[11px] text-slate-400">
-              <span>SCANNER ACCURACY: <strong className="text-cyan-400">99.4%</strong></span>
+              <span>SCANNER ACCURACY: <strong className="text-amber-300">NOT MEASURED</strong></span>
               <div className="flex gap-2">
                 <button
                   onClick={() => handleTriggerTestDefect("LOW_FILL")}
@@ -398,24 +401,28 @@ export default function PackagingInspectionView() {
                 className={`font-bold px-2 py-0.5 rounded text-[10px] ${
                   displayBottle?.fillStatus === FILL_LEVEL_STATUS.PASS
                     ? "bg-emerald-100 text-emerald-700"
-                    : "bg-amber-100 text-amber-700"
+                    : displayBottle
+                      ? "bg-amber-100 text-amber-700"
+                      : "bg-slate-200 text-slate-600"
                 }`}
               >
-                {displayBottle?.fillStatus || "PASS"}
+                {displayBottle?.fillStatus || "NO SAMPLE"}
               </span>
             </div>
 
             <div className="space-y-1">
               <div className="flex justify-between text-[11px] text-slate-500">
                 <span>Measured Level:</span>
-                <strong className="text-slate-900">{displayBottle?.fillPercentage || 90}%</strong>
+                <strong className="text-slate-900">
+                  {displayBottle ? `${displayBottle.fillPercentage}%` : "—"}
+                </strong>
               </div>
               <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
                 <div
                   className={`h-full transition-all duration-300 ${
                     displayBottle?.fillStatus === FILL_LEVEL_STATUS.PASS ? "bg-emerald-500" : "bg-amber-500"
                   }`}
-                  style={{ width: `${displayBottle?.fillPercentage || 90}%` }}
+                  style={{ width: `${displayBottle?.fillPercentage || 0}%` }}
                 />
               </div>
               <div className="flex justify-between text-[9px] text-slate-400 font-mono">
@@ -434,14 +441,18 @@ export default function PackagingInspectionView() {
                 className={`font-bold px-2 py-0.5 rounded text-[10px] ${
                   displayBottle?.capStatus === CAP_STATUS.PASS
                     ? "bg-emerald-100 text-emerald-700"
-                    : "bg-red-100 text-red-700"
+                    : displayBottle
+                      ? "bg-red-100 text-red-700"
+                      : "bg-slate-200 text-slate-600"
                 }`}
               >
-                {displayBottle?.capStatus || "PASS"}
+                {displayBottle?.capStatus || "NO SAMPLE"}
               </span>
             </div>
             <p className="text-[11px] text-slate-500">
-              {displayBottle?.capStatus === CAP_STATUS.PASS
+              {!displayBottle
+                ? "No sample available."
+                : displayBottle.capStatus === CAP_STATUS.PASS
                 ? "Cap correctly positioned, sealed and undamaged."
                 : `Anomaly detected: Cap is ${displayBottle?.capStatus}.`}
             </p>
@@ -455,14 +466,18 @@ export default function PackagingInspectionView() {
                 className={`font-bold px-2 py-0.5 rounded text-[10px] ${
                   displayBottle?.bottleStatus === BOTTLE_BODY_STATUS.PASS
                     ? "bg-emerald-100 text-emerald-700"
-                    : "bg-red-100 text-red-700"
+                    : displayBottle
+                      ? "bg-red-100 text-red-700"
+                      : "bg-slate-200 text-slate-600"
                 }`}
               >
-                {displayBottle?.bottleStatus || "PASS"}
+                {displayBottle?.bottleStatus || "NO SAMPLE"}
               </span>
             </div>
             <p className="text-[11px] text-slate-500">
-              {displayBottle?.bottleStatus === BOTTLE_BODY_STATUS.PASS
+              {!displayBottle
+                ? "No sample available."
+                : displayBottle.bottleStatus === BOTTLE_BODY_STATUS.PASS
                 ? "Glass body clear of cracks, scratches or deformation."
                 : `Surface defect spotted: ${displayBottle?.bottleStatus}.`}
             </p>
@@ -470,8 +485,8 @@ export default function PackagingInspectionView() {
 
           {/* AI Model Confidence Bar */}
           <div className="pt-1 flex items-center justify-between text-xs text-slate-500 border-t border-slate-100">
-            <span>AI Model Confidence:</span>
-            <strong className="text-cyan-700 font-bold">{Math.round((displayBottle?.confidence || 0.97) * 100)}%</strong>
+            <span>Model confidence:</span>
+            <strong className="text-amber-700 font-bold">NOT MEASURED (DEMO)</strong>
           </div>
         </div>
       </div>
