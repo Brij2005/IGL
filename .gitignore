@@ -19,6 +19,8 @@ htmlcov/
 dist/
 build/
 frontend/dist/
+.dist/
+backend/static/
 
 # Environment variables & secrets
 .env
@@ -40,6 +42,12 @@ backend/.env
 *.sqlite3
 backend/*.db
 backend/*.sqlite3
+backend/data/
+backend/evidence/
+backend/reports/
+backend/models/
+backend/runs/
+backend/.tmp*
 
 # Logs
 *.log

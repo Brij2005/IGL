@@ -1,0 +1,47 @@
+# Version control / CI
+.git
+.gitignore
+.github
+
+# Python virtualenvs and caches
+.venv
+backend/.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+**/.pytest_cache
+.coverage
+htmlcov
+
+# Node dependencies and build output (rebuilt inside the image)
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Secrets - never bake into an image
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.production.example
+
+# Local runtime data - provided by volumes at runtime
+*.db
+*.db-wal
+*.db-shm
+backend/igl_safety.db
+backend/data
+backend/evidence
+backend/reports
+backend/runs
+backend/models
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docs and reports are not needed at runtime
+docs_and_reports

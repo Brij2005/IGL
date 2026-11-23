@@ -1,0 +1,214 @@
+{
+  "model_id": "model-water-leakage",
+  "active_version": "3",
+  "version": "3",
+  "status": "AVAILABLE",
+  "weights": "model-water-leakage/v3/best.pt",
+  "preserved_versions": {
+    "1": "model-water-leakage/v1/best.pt",
+    "2": "model-water-leakage/v2/best.pt"
+  },
+  "source_datasets": [
+    {
+      "name": "standing-water",
+      "workspace": "water-leakage-detection",
+      "project": "water-leakage",
+      "version": 4,
+      "license": "CC BY 4.0",
+      "url": "https://universe.roboflow.com/water-leakage-detection/water-leakage/dataset/4",
+      "source_class": "Standing Water",
+      "mapped_class": "Water Accumulation",
+      "images_used": 3542
+    },
+    {
+      "name": "kai-water-leakage",
+      "workspace": "kai-bsnlf",
+      "project": "water-leakage-bnrzx",
+      "version": 1,
+      "license": "CC BY 4.0",
+      "url": "https://universe.roboflow.com/kai-bsnlf/water-leakage-bnrzx/dataset/1",
+      "source_classes": {
+        "liquid_drip_leakage": "Water Dripping",
+        "liquid_jet_leakage": "Water Spraying"
+      },
+      "dropped_classes": ["fire", "gas_leakage", "smoke"],
+      "images_used": 577
+    },
+    {
+      "name": "jaishreeram-pipeline-leakage1",
+      "workspace": "jaishreeram",
+      "project": "pipeline_leakage1",
+      "version": 1,
+      "license": "CC BY 4.0",
+      "url": "https://universe.roboflow.com/jaishreeram/pipeline_leakage1/dataset/1",
+      "source_classes": {
+        "leak": "Pipe Joint Leakage",
+        "water": "Visible Water Flow",
+        "no leak": "Normal/Dry Pipeline"
+      },
+      "dropped_classes": ["crack"],
+      "images_used": 5563
+    },
+    {
+      "name": "onekode3-pipeline-leak1",
+      "workspace": "onekode3",
+      "project": "pipeline_leak1",
+      "version": 1,
+      "license": "CC BY 4.0",
+      "url": "https://universe.roboflow.com/onekode3/pipeline_leak1/dataset/1",
+      "source_classes": {
+        "water leak": "Pipe Joint Leakage",
+        "no leak": "Normal/Dry Pipeline"
+      },
+      "dropped_classes": ["gas leak"],
+      "images_used": 2841
+    },
+    {
+      "name": "projet-pipe-leak",
+      "workspace": "projet-5cii8",
+      "project": "pipe-leak-u31py",
+      "version": 1,
+      "license": "CC BY 4.0",
+      "url": "https://universe.roboflow.com/projet-5cii8/pipe-leak-u31py/dataset/1",
+      "source_classes": {
+        "water": "Visible Water Flow"
+      },
+      "dropped_classes": ["gas", "crack"],
+      "images_used": 162
+    }
+  ],
+  "excluded_datasets": [
+    {
+      "workspace": "leak-adhw8",
+      "project": "water-leak-wgdaq",
+      "version": 3,
+      "reason": "Exported class name is only '0' and could not be semantically verified"
+    },
+    {
+      "workspace": "kyle-scally-4ixoi",
+      "project": "pipeline-cctv-defect",
+      "version": 1,
+      "reason": "Only 56 images with 19 'Broken pipe' boxes; not sufficient for a reliable Pipe Burst class"
+    }
+  ],
+  "classes": [
+    "Water Dripping",
+    "Water Spraying",
+    "Visible Water Flow",
+    "Pipe Joint Leakage",
+    "Water Accumulation",
+    "Normal/Dry Pipeline"
+  ],
+  "dataset": {
+    "images": 12685,
+    "labels": 12685,
+    "duplicates_removed": 110,
+    "missing_labels_skipped": 9,
+    "malformed_annotations": 0,
+    "train": 7931,
+    "val": 2377,
+    "test": 2377,
+    "balanced_train_images": 8963,
+    "split_by_source_group": true,
+    "class_distribution": {
+      "Water Dripping": 255,
+      "Water Spraying": 582,
+      "Visible Water Flow": 2025,
+      "Pipe Joint Leakage": 4236,
+      "Water Accumulation": 6468,
+      "Normal/Dry Pipeline": 2574
+    }
+  },
+  "training": {
+    "epochs": 4,
+    "imgsz": 192,
+    "batch": 32,
+    "device": "cpu",
+    "cpu": "Intel i5-1035G1",
+    "cuda": false,
+    "seconds": 3182.8
+  },
+  "validation_metrics": {
+    "precision": 0.33381,
+    "recall": 0.34281,
+    "mAP50": 0.24173,
+    "mAP50_95": 0.14443
+  },
+  "test_metrics": {
+    "precision": 0.47604713049819464,
+    "recall": 0.2688873669543778,
+    "mAP50": 0.18531607249854656,
+    "mAP50_95": 0.12707156852773138
+  },
+  "test_mAP50_by_class": {
+    "Water Dripping": 0.06690476190476191,
+    "Water Spraying": 0.02259770114942529,
+    "Visible Water Flow": 0.08497767857142857,
+    "Pipe Joint Leakage": 0.29409170598719253,
+    "Water Accumulation": 0.5281810294721074,
+    "Normal/Dry Pipeline": 0.11514355790636382
+  },
+  "inference_speed_ms_per_image": 14.2,
+  "model_size_bytes": 6453994,
+  "comparison_with_previous_versions": {
+    "v1": {
+      "precision": 0.06278507592005664,
+      "recall": 0.05294458949811431,
+      "mAP50": 0.04190376791638425,
+      "mAP50_95": 0.02666646781203932,
+      "note": "Single-class Water Accumulation model; preserves rollback capability."
+    },
+    "v2": {
+      "precision": 0.2791441216475829,
+      "recall": 0.2197487396327171,
+      "mAP50": 0.13774286878142158,
+      "mAP50_95": 0.0873755279539063,
+      "note": "Multi-class but no Water Dripping or Water Spraying performance."
+    },
+    "v3": {
+      "precision": 0.47604713049819464,
+      "recall": 0.2688873669543778,
+      "mAP50": 0.18531607249854656,
+      "mAP50_95": 0.12707156852773138,
+      "note": "Best aggregate and class coverage; promoted as active version."
+    }
+  },
+  "video_evaluation": {
+    "source": "Genuine public water-leak videos from https://github.com/freedomwebtech/yolo11-water-leak (not factory CCTV)",
+    "water_leak_5": {
+      "frames": 300,
+      "detections_at_conf_0.25": 0,
+      "detections_at_conf_0.10": 46,
+      "classes_at_conf_0.10": {
+        "Water Spraying": 46
+      }
+    },
+    "water_leak_6": {
+      "frames": 173,
+      "detections_at_conf_0.25": 6,
+      "detections_at_conf_0.10": 26,
+      "classes_at_conf_0.25": {
+        "Water Accumulation": 6
+      },
+      "classes_at_conf_0.10": {
+        "Water Accumulation": 20,
+        "Water Spraying": 6
+      }
+    },
+    "event_path_after_dedup": {
+      "video": "water_leak_5.mp4",
+      "confidence": 0.10,
+      "stored_detection_events": 4,
+      "stored_evidence_files": 4,
+      "stored_alerts": 2,
+      "note": "Temporary evaluation records were removed from the operational database after verification."
+    }
+  },
+  "limitations": [
+    "Water Dripping and Water Spraying remain weak; their test mAP50 is 0.0669 and 0.0226.",
+    "Pipe Burst is not represented by a reliable dataset and is not claimed.",
+    "Training used 192px images for 4 epochs on CPU; this is a baseline, not a production accuracy guarantee.",
+    "No factory CCTV footage or real camera stream has been used.",
+    "The public videos used for inference testing are not equivalent to factory CCTV validation."
+  ]
+}

@@ -73,7 +73,7 @@ export default function CameraInputView() {
       const canvas = canvasRef.current;
 
       const isVideoSource = streamSource?.type === "webcam" || streamSource?.type === "file";
-      const isImageSource = streamSource?.type === "image" && imageRef.current?.complete;
+      const isImageSource = (streamSource?.type === "image" || streamSource?.type === "backend") && imageRef.current?.complete;
       const source = isVideoSource && video?.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
         ? video
         : isImageSource
@@ -237,7 +237,7 @@ export default function CameraInputView() {
             </div>
             <h3 className="text-sm font-bold text-slate-200">Option 2: IP CCTV Camera (RTSP)</h3>
             <p className="text-xs text-slate-400">
-              Direct RTSP decoding is not available yet. This option will report that limitation instead of showing a fake connected feed.
+              Authorized RTSP cameras are decoded by the backend and exposed as an authenticated browser-compatible stream.
             </p>
           </div>
 
@@ -262,7 +262,7 @@ export default function CameraInputView() {
               className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"
             >
               <Radio className="w-4 h-4" />
-              <span>Check RTSP Support</span>
+              <span>{connecting ? "Connecting..." : "Connect RTSP Camera"}</span>
             </button>
           </form>
         </div>
@@ -319,12 +319,12 @@ export default function CameraInputView() {
 
         {/* Video & Hidden Canvas */}
         <div className="relative rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex items-center justify-center">
-          {streamSource?.type === "image" ? (
+          {(streamSource?.type === "image" || streamSource?.type === "backend") ? (
             <img
               ref={imageRef}
               src={streamSource.url}
               alt={streamSource.name}
-              onError={() => setError("Uploaded image could not be loaded. Choose another image file.")}
+              onError={() => setError(streamSource?.type === "backend" ? "Backend camera frame could not be loaded. Check camera status." : "Uploaded image could not be loaded. Choose another image file.")}
               className={`w-full h-full object-contain transition-transform duration-300 ${
                 isMirrored ? "-scale-x-100" : ""
               }`}

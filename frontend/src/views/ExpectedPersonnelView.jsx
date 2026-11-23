@@ -66,8 +66,10 @@ export default function ExpectedPersonnelView() {
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
-  // Active Detection Mode: Live Camera vs Prototype Staged Simulator
-  const [isDemoMode, setIsDemoMode] = useState(true);
+  // Active Detection Mode: Live Camera vs Prototype Staged Simulator.
+  // Defaults to LIVE so the page never opens showing a fabricated person count.
+  // The staged simulator is an explicit opt-in test aid, clearly labelled in the UI.
+  const [isDemoMode, setIsDemoMode] = useState(false);
 
   // Staged Test simulated person tracks (Track IDs only, NO fake employee names)
   const [simulatedPersonCount, setSimulatedPersonCount] = useState(5);

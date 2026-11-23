@@ -1,0 +1,1327 @@
+{
+  "weights": "models\\model-water-leakage\\v3\\best.pt",
+  "model": {
+    "weights": "models\\model-water-leakage\\v3\\best.pt",
+    "version": "v3"
+  },
+  "dataset_root": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced",
+  "split": "test",
+  "imgsz": 192,
+  "conf": 0.25,
+  "results_dict": {
+    "metrics/precision(B)": 0.47604713049819464,
+    "metrics/recall(B)": 0.2688873669543778,
+    "metrics/mAP50(B)": 0.18531607249854656,
+    "metrics/mAP50-95(B)": 0.12707156852773138,
+    "fitness": 0.12707156852773138
+  },
+  "per_class": [
+    {
+      "class_id": 0,
+      "class_name": "Water Dripping",
+      "precision": 0.6,
+      "recall": 0.09090909090909091,
+      "mAP50": 0.06690476190476191,
+      "mAP50_95": 0.0242484126984127
+    },
+    {
+      "class_id": 1,
+      "class_name": "Water Spraying",
+      "precision": 0.1452991452991453,
+      "recall": 0.14049586776859505,
+      "mAP50": 0.02259770114942529,
+      "mAP50_95": 0.008301600985221676
+    },
+    {
+      "class_id": 2,
+      "class_name": "Visible Water Flow",
+      "precision": 0.3537117903930131,
+      "recall": 0.23964497041420119,
+      "mAP50": 0.08497767857142857,
+      "mAP50_95": 0.06071595178855045
+    },
+    {
+      "class_id": 3,
+      "class_name": "Pipe Joint Leakage",
+      "precision": 0.5750528541226215,
+      "recall": 0.3756906077348066,
+      "mAP50": 0.29409170598719253,
+      "mAP50_95": 0.20133913988513957
+    },
+    {
+      "class_id": 4,
+      "class_name": "Water Accumulation",
+      "precision": 0.6766839378238342,
+      "recall": 0.5683202785030461,
+      "mAP50": 0.5281810294721074,
+      "mAP50_95": 0.3934358374118661
+    },
+    {
+      "class_id": 5,
+      "class_name": "Normal/Dry Pipeline",
+      "precision": 0.5055350553505535,
+      "recall": 0.19826338639652677,
+      "mAP50": 0.11514355790636382,
+      "mAP50_95": 0.0743884683971977
+    }
+  ],
+  "confusion_matrix": {
+    "labels": {
+      "0": "Water Dripping",
+      "1": "Water Spraying",
+      "2": "Visible Water Flow",
+      "3": "Pipe Joint Leakage",
+      "4": "Water Accumulation",
+      "5": "Normal/Dry Pipeline"
+    },
+    "matrix": [
+      [
+        6.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        4.0
+      ],
+      [
+        0.0,
+        17.0,
+        0.0,
+        15.0,
+        0.0,
+        5.0,
+        80.0
+      ],
+      [
+        0.0,
+        0.0,
+        41.0,
+        81.0,
+        1.0,
+        13.0,
+        93.0
+      ],
+      [
+        0.0,
+        0.0,
+        91.0,
+        251.0,
+        0.0,
+        3.0,
+        128.0
+      ],
+      [
+        0.0,
+        0.0,
+        2.0,
+        0.0,
+        652.0,
+        7.0,
+        304.0
+      ],
+      [
+        0.0,
+        1.0,
+        10.0,
+        9.0,
+        0.0,
+        135.0,
+        116.0
+      ],
+      [
+        60.0,
+        103.0,
+        194.0,
+        368.0,
+        496.0,
+        528.0,
+        0.0
+      ]
+    ]
+  },
+  "error_analysis": {
+    "confidence_threshold": 0.25,
+    "iou_threshold": 0.5,
+    "total_ground_truth": 3089,
+    "total_predictions": 1956,
+    "total_true_positives": 1106,
+    "per_class": {
+      "Water Dripping": {
+        "tp": 3,
+        "fp": 2,
+        "fn": 63,
+        "precision": 0.6,
+        "recall": 0.0455,
+        "f1": 0.0846
+      },
+      "Water Spraying": {
+        "tp": 17,
+        "fp": 107,
+        "fn": 104,
+        "precision": 0.1371,
+        "recall": 0.1405,
+        "f1": 0.1388
+      },
+      "Visible Water Flow": {
+        "tp": 36,
+        "fp": 117,
+        "fn": 302,
+        "precision": 0.2353,
+        "recall": 0.1065,
+        "f1": 0.1466
+      },
+      "Pipe Joint Leakage": {
+        "tp": 267,
+        "fp": 207,
+        "fn": 457,
+        "precision": 0.5633,
+        "recall": 0.3688,
+        "f1": 0.4458
+      },
+      "Water Accumulation": {
+        "tp": 625,
+        "fp": 237,
+        "fn": 524,
+        "precision": 0.7251,
+        "recall": 0.544,
+        "f1": 0.6216
+      },
+      "Normal/Dry Pipeline": {
+        "tp": 158,
+        "fp": 180,
+        "fn": 533,
+        "precision": 0.4675,
+        "recall": 0.2287,
+        "f1": 0.3071
+      }
+    },
+    "false_positive_examples": [
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000669.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.2547,
+        "best_iou": 0.0,
+        "xyxy": [
+          151.3,
+          140.2,
+          624.4,
+          640.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000670.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.5878,
+        "best_iou": 0.0,
+        "xyxy": [
+          167.4,
+          68.2,
+          440.0,
+          461.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000671.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.343,
+        "best_iou": 0.0,
+        "xyxy": [
+          57.2,
+          137.8,
+          626.0,
+          639.6
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000672.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.319,
+        "best_iou": 0.0,
+        "xyxy": [
+          146.7,
+          68.0,
+          434.4,
+          456.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000674.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.3745,
+        "best_iou": 0.0,
+        "xyxy": [
+          444.0,
+          256.6,
+          538.6,
+          390.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000675.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.5562,
+        "best_iou": 0.0,
+        "xyxy": [
+          115.0,
+          114.5,
+          630.4,
+          561.3
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000676.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.865,
+        "best_iou": 0.0,
+        "xyxy": [
+          175.6,
+          81.1,
+          438.7,
+          459.1
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000677.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.7782,
+        "best_iou": 0.0,
+        "xyxy": [
+          86.8,
+          149.4,
+          548.6,
+          520.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000680.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.4853,
+        "best_iou": 0.0,
+        "xyxy": [
+          136.6,
+          1.7,
+          638.7,
+          569.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000680.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.3007,
+        "best_iou": 0.0,
+        "xyxy": [
+          158.7,
+          42.1,
+          380.1,
+          464.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000682.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.4737,
+        "best_iou": 0.0,
+        "xyxy": [
+          113.5,
+          43.9,
+          635.2,
+          635.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000684.jpg",
+        "predicted_class": "Water Accumulation",
+        "confidence": 0.2969,
+        "best_iou": 0.0,
+        "xyxy": [
+          112.1,
+          60.3,
+          640.0,
+          313.3
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000685.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.8416,
+        "best_iou": 0.0,
+        "xyxy": [
+          150.0,
+          83.3,
+          454.3,
+          494.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000687.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.517,
+        "best_iou": 0.0,
+        "xyxy": [
+          114.1,
+          43.3,
+          634.8,
+          635.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000691.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.7017,
+        "best_iou": 0.0,
+        "xyxy": [
+          113.8,
+          45.5,
+          634.9,
+          635.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000694.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.5423,
+        "best_iou": 0.0,
+        "xyxy": [
+          114.9,
+          43.3,
+          635.3,
+          635.3
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000695.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.67,
+        "best_iou": 0.0,
+        "xyxy": [
+          170.0,
+          76.6,
+          438.7,
+          457.1
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000696.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.8557,
+        "best_iou": 0.0,
+        "xyxy": [
+          158.9,
+          160.4,
+          537.7,
+          448.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000697.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.9099,
+        "best_iou": 0.0,
+        "xyxy": [
+          175.4,
+          81.2,
+          439.4,
+          455.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000701.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.5246,
+        "best_iou": 0.0,
+        "xyxy": [
+          114.3,
+          42.9,
+          635.5,
+          635.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000702.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.8185,
+        "best_iou": 0.0,
+        "xyxy": [
+          149.3,
+          83.0,
+          454.4,
+          491.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000704.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.3043,
+        "best_iou": 0.0,
+        "xyxy": [
+          417.6,
+          255.3,
+          515.4,
+          406.6
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000705.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.3658,
+        "best_iou": 0.0,
+        "xyxy": [
+          114.6,
+          43.9,
+          635.5,
+          635.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000707.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.9308,
+        "best_iou": 0.0,
+        "xyxy": [
+          153.0,
+          84.8,
+          467.0,
+          497.9
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000708.jpg",
+        "predicted_class": "Water Accumulation",
+        "confidence": 0.3629,
+        "best_iou": 0.0,
+        "xyxy": [
+          61.5,
+          1.1,
+          627.2,
+          518.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000709.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.5457,
+        "best_iou": 0.0,
+        "xyxy": [
+          164.6,
+          62.5,
+          441.3,
+          458.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000711.jpg",
+        "predicted_class": "Water Spraying",
+        "confidence": 0.4041,
+        "best_iou": 0.0,
+        "xyxy": [
+          114.3,
+          44.0,
+          635.3,
+          635.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000718.jpg",
+        "predicted_class": "Normal/Dry Pipeline",
+        "confidence": 0.2509,
+        "best_iou": 0.0,
+        "xyxy": [
+          258.0,
+          79.3,
+          488.2,
+          486.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000724.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.403,
+        "best_iou": 0.0,
+        "xyxy": [
+          252.8,
+          53.4,
+          470.3,
+          582.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000730.jpg",
+        "predicted_class": "Normal/Dry Pipeline",
+        "confidence": 0.312,
+        "best_iou": 0.0,
+        "xyxy": [
+          57.5,
+          72.1,
+          511.8,
+          640.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000742.jpg",
+        "predicted_class": "Normal/Dry Pipeline",
+        "confidence": 0.3238,
+        "best_iou": 0.0,
+        "xyxy": [
+          244.1,
+          78.6,
+          488.2,
+          497.1
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000745.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.6679,
+        "best_iou": 0.2683,
+        "xyxy": [
+          205.0,
+          2.0,
+          625.2,
+          538.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000749.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.3255,
+        "best_iou": 0.2717,
+        "xyxy": [
+          80.1,
+          87.0,
+          563.0,
+          637.3
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000751.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.4261,
+        "best_iou": 0.0,
+        "xyxy": [
+          196.2,
+          1.0,
+          634.4,
+          587.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000754.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.4412,
+        "best_iou": 0.2147,
+        "xyxy": [
+          187.7,
+          0.9,
+          635.6,
+          607.9
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000756.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.4635,
+        "best_iou": 0.2176,
+        "xyxy": [
+          189.9,
+          1.5,
+          635.2,
+          601.2
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000756.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.2631,
+        "best_iou": 0.4849,
+        "xyxy": [
+          230.5,
+          111.3,
+          467.7,
+          559.2
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000763.jpg",
+        "predicted_class": "Normal/Dry Pipeline",
+        "confidence": 0.3174,
+        "best_iou": 0.0,
+        "xyxy": [
+          4.0,
+          105.5,
+          446.8,
+          638.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000771.jpg",
+        "predicted_class": "Normal/Dry Pipeline",
+        "confidence": 0.3137,
+        "best_iou": 0.0,
+        "xyxy": [
+          256.9,
+          76.9,
+          488.7,
+          486.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000772.jpg",
+        "predicted_class": "Normal/Dry Pipeline",
+        "confidence": 0.27,
+        "best_iou": 0.0,
+        "xyxy": [
+          257.1,
+          77.9,
+          488.0,
+          489.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000777.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.591,
+        "best_iou": 0.0,
+        "xyxy": [
+          116.3,
+          280.2,
+          347.4,
+          537.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000779.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.432,
+        "best_iou": 0.0,
+        "xyxy": [
+          61.2,
+          126.2,
+          350.8,
+          404.1
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000780.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.7052,
+        "best_iou": 0.0,
+        "xyxy": [
+          125.4,
+          272.5,
+          358.1,
+          542.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000787.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.8562,
+        "best_iou": 0.0,
+        "xyxy": [
+          129.5,
+          272.6,
+          356.9,
+          541.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000789.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.8968,
+        "best_iou": 0.0,
+        "xyxy": [
+          130.5,
+          273.1,
+          356.6,
+          541.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000790.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.5175,
+        "best_iou": 0.0,
+        "xyxy": [
+          172.5,
+          167.5,
+          400.6,
+          374.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000791.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.7522,
+        "best_iou": 0.0,
+        "xyxy": [
+          127.1,
+          273.6,
+          357.1,
+          541.2
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000793.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.8047,
+        "best_iou": 0.0,
+        "xyxy": [
+          130.4,
+          272.2,
+          356.7,
+          541.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000794.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.321,
+        "best_iou": 0.0,
+        "xyxy": [
+          129.4,
+          271.9,
+          359.1,
+          531.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000794.jpg",
+        "predicted_class": "Pipe Joint Leakage",
+        "confidence": 0.2783,
+        "best_iou": 0.0,
+        "xyxy": [
+          9.0,
+          267.8,
+          357.0,
+          633.7
+        ]
+      }
+    ],
+    "false_negative_examples": [
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000669.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          174.6,
+          163.1,
+          580.0,
+          479.1
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000670.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          182.4,
+          75.7,
+          437.3,
+          467.2
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000671.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          41.5,
+          97.9,
+          609.9,
+          638.6
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000672.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          149.3,
+          56.0,
+          431.4,
+          462.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000673.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          1.9,
+          14.9,
+          640.0,
+          582.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000674.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          445.9,
+          256.6,
+          509.9,
+          378.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000675.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          165.9,
+          165.6,
+          588.0,
+          486.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000676.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          179.2,
+          78.9,
+          443.7,
+          456.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000677.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          73.2,
+          145.7,
+          540.1,
+          523.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000678.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          27.9,
+          69.7,
+          625.5,
+          631.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000680.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          179.2,
+          80.0,
+          443.7,
+          456.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000681.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          35.3,
+          163.6,
+          461.4,
+          495.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000682.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          117.3,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000684.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          268.8,
+          311.5,
+          640.0,
+          490.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000685.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          151.5,
+          83.2,
+          452.3,
+          494.9
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000686.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          119.5,
+          54.2,
+          640.0,
+          598.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000687.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          117.3,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000688.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          65.1,
+          36.3,
+          637.2,
+          640.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000689.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          62.0,
+          15.3,
+          635.1,
+          640.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000690.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          80.0,
+          22.3,
+          640.0,
+          640.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000691.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          117.3,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000692.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          118.4,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000693.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          266.7,
+          293.3,
+          640.0,
+          504.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000694.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          118.4,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000696.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          160.4,
+          148.4,
+          553.2,
+          455.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000697.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          179.2,
+          78.9,
+          443.7,
+          456.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000698.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          0.0,
+          0.0,
+          629.1,
+          567.6
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000699.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          119.5,
+          54.2,
+          640.0,
+          598.7
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000700.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          118.4,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000701.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          117.3,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000702.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          151.5,
+          83.2,
+          452.3,
+          494.9
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000703.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          446.9,
+          256.6,
+          509.9,
+          380.2
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000704.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          428.7,
+          241.7,
+          513.6,
+          372.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000705.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          117.3,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000706.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          242.1,
+          129.4,
+          366.8,
+          198.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000707.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          141.5,
+          79.2,
+          472.6,
+          504.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000708.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          59.4,
+          0.0,
+          609.4,
+          511.1
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000709.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          179.2,
+          79.8,
+          443.7,
+          454.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000710.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          52.6,
+          0.0,
+          623.7,
+          633.6
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000711.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          117.3,
+          54.4,
+          640.0,
+          598.4
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000712.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          63.8,
+          170.0,
+          500.6,
+          519.6
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000713.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          79.9,
+          11.9,
+          640.0,
+          623.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000714.jpg",
+        "gt_class": "Pipe Joint Leakage",
+        "xyxy": [
+          290.9,
+          0.0,
+          557.9,
+          398.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000717.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          256.0,
+          82.1,
+          488.5,
+          488.2
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000720.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          255.0,
+          155.6,
+          455.3,
+          403.3
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000722.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          94.8,
+          213.8,
+          549.9,
+          519.8
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000723.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          149.7,
+          270.6,
+          563.7,
+          513.0
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000725.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          278.4,
+          164.3,
+          438.4,
+          391.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000726.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          246.9,
+          150.4,
+          467.5,
+          408.5
+        ]
+      },
+      {
+        "image": "C:\\Users\\Krishna Sharma\\Desktop\\IGL\\backend\\data\\leakage_multiclass_balanced\\test\\images\\jaishreeram-pipe_000728.jpg",
+        "gt_class": "Visible Water Flow",
+        "xyxy": [
+          257.1,
+          82.1,
+          488.5,
+          490.3
+        ]
+      }
+    ]
+  },
+  "sample_predictions": [
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_01.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_02.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_03.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_04.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_05.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_06.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_07.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_08.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_09.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_10.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_11.jpg",
+    "docs_and_reports\\evaluations\\v3\\samples\\sample_12.jpg"
+  ],
+  "inference_speed_ms": {
+    "preprocess": 0.37148136306251606,
+    "inference": 14.167972528393316,
+    "loss": 0.00018716880289205344,
+    "postprocess": 0.5788337399628285
+  },
+  "manual_inference_ms_per_image": 54.74,
+  "model_size_bytes": 6453994,
+  "timestamp": "2026-11-21T14:44:33Z"
+}

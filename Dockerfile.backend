@@ -1,0 +1,52 @@
+# IGL VisionGuard - Backend image (API + AI inference + camera workers)
+#
+# Build:  docker build -f Dockerfile.backend -t igl-visionguard-backend .
+# Run:    see docker-compose.yml
+#
+# The model weights are intentionally NOT baked into this image. They are
+# provided at runtime via the igl-models volume so that model updates never
+# require an image rebuild and no large binaries bloat the image.
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# System libraries required by OpenCV (opencv-python wheel needs libGL/libglib).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies first so code changes do not invalidate the layer.
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Application code only. .dockerignore excludes .env, datasets, caches and the DB.
+COPY backend/ /app/
+
+# Create a non-root user and the writable data directories.
+RUN useradd --create-home --uid 10001 igl \
+    && mkdir -p /data/evidence /data/reports /app/models \
+    && chown -R igl:igl /app /data
+
+USER igl
+
+EXPOSE 8000
+
+# Basic container-level health check (the app also exposes /api/system/health).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/api/system/health || exit 1
+
+# Single worker by default: camera workers are threads inside the process, so
+# multiple uvicorn workers would duplicate inference. Scale by adding hosts.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

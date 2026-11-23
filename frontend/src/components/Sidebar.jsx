@@ -12,7 +12,19 @@ import {
   Camera,
   Boxes,
   UserCheck,
-  Users
+  Users,
+  Video,
+  Map,
+  Droplets,
+  Image,
+  Network,
+  Cpu,
+  FileBarChart,
+  Bell,
+  HeartPulse,
+  ScrollText,
+  Wrench,
+  DoorOpen
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 
@@ -24,6 +36,7 @@ export default function Sidebar() {
 
   const navItems = [
     { id: "dashboard", label: "Overview", icon: Home },
+    { id: "security", label: "Smart Entry & Exit", icon: DoorOpen, badge: "NEW" },
     { id: "camera-input", label: "Camera Setup", icon: Camera, badge: stats.cameras_online > 0 ? "LIVE" : null },
     { id: "live-monitoring", label: "Live Monitoring", icon: Tv },
     { id: "expected-personnel", label: "Expected Personnel", icon: UserCheck, badge: unknownAlerts > 0 ? unknownAlerts : "ALERT" },
@@ -35,7 +48,19 @@ export default function Sidebar() {
     { id: "personnel", label: "Incidents", icon: Flame },
     { id: "analytics", label: "Analytics", icon: BarChart2 },
     { id: "camera-health", label: "Camera & AI Health", icon: Activity },
-    { id: "config", label: "Configuration", icon: Settings }
+    { id: "camera-management", label: "Camera Management", icon: Video },
+    { id: "camera-setup", label: "Camera Angle & Zones", icon: Map },
+    { id: "leakage", label: "Water Leakage", icon: Droplets },
+    { id: "evidence", label: "Evidence Gallery", icon: Image },
+    { id: "plant", label: "Plant & Pipelines", icon: Network },
+    { id: "models", label: "AI Models & Datasets", icon: Cpu },
+    { id: "reports", label: "Reports", icon: FileBarChart },
+    { id: "notifications", label: "Notifications", icon: Bell },
+    { id: "system-health", label: "System Health", icon: HeartPulse },
+    { id: "audit-logs", label: "Audit Logs", icon: ScrollText },
+    { id: "users", label: "User Management", icon: Users },
+    { id: "config", label: "Configuration", icon: Settings },
+    { id: "settings", label: "General Settings", icon: Wrench }
   ];
 
   return (

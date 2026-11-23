@@ -32,7 +32,10 @@ import {
   fetchRegisteredPersonnelApi,
   createRegisteredPersonnelApi,
   updateRegisteredPersonnelApi,
-  deleteRegisteredPersonnelApi
+  deleteRegisteredPersonnelApi,
+  startCameraApi,
+  stopCameraApi,
+  cameraStreamUrl
 } from "../services/api";
 
 const SafetyContext = createContext(null);
@@ -209,14 +212,34 @@ export function SafetyProvider({ children }) {
     }
   };
 
-  // RTSP streams need a backend decoder and browser-compatible stream endpoint.
-  const connectRtsp = async (rtspUrl, name = "IP Camera RTSP") => {
-    void rtspUrl;
-    void name;
-    return {
-      success: false,
-      error: "RTSP playback is not implemented in this app yet. The URL cannot be used as a live feed until a backend RTSP decoder is added. Connect a webcam or upload a video instead."
-    };
+  // RTSP streams are decoded by the backend and exposed as an authenticated MJPEG stream.
+  const connectRtsp = async (rtspUrl, name = "IP Camera RTSP", credentials = {}) => {
+    try {
+      const registered = await registerCameraApi({
+        name,
+        source_type: "rtsp",
+        source_url: rtspUrl,
+        username: credentials.username || "",
+        password: credentials.password || ""
+      });
+      if (!registered || registered.status !== "SUCCESS") {
+        return { success: false, error: "Backend camera registration failed." };
+      }
+      const cameraId = registered.camera.id;
+      const started = await startCameraApi(cameraId);
+      if (!started || started.detail) {
+        return { success: false, error: started?.detail || "Backend could not start the RTSP stream." };
+      }
+      if (activeStream && activeStream.getTracks) activeStream.getTracks().forEach((track) => track.stop());
+      if (streamSource?.url?.startsWith("blob:")) URL.revokeObjectURL(streamSource.url);
+      setActiveStream(null);
+      const camConfig = { type: "backend", name, url: cameraStreamUrl(cameraId), cameraId };
+      setStreamSource(camConfig);
+      await refreshBackendData();
+      return { success: true, cameraId, streamUrl: camConfig.url };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : "RTSP connection failed." };
+    }
   };
 
   // Connect Video File Upload
@@ -253,6 +276,9 @@ export function SafetyProvider({ children }) {
 
   // Disconnect Stream
   const disconnectStream = () => {
+    if (streamSource?.cameraId) {
+      stopCameraApi(streamSource.cameraId).catch(() => {});
+    }
     if (activeStream && activeStream.getTracks) {
       activeStream.getTracks().forEach((track) => track.stop());
     }
@@ -278,7 +304,7 @@ export function SafetyProvider({ children }) {
     playAlertSound();
     const payload = {
       event_type: eventData.event_type,
-      camera_id: streamSource?.name || "CAM-LIVE",
+      camera_id: streamSource?.cameraId || streamSource?.name || "CAM-LIVE",
       camera_name: streamSource?.name || "Live Stream",
       zone_name: eventData.zone_name || "Zone A",
       severity: eventData.severity || "HIGH",
@@ -300,7 +326,7 @@ export function SafetyProvider({ children }) {
 
     const payload = {
       track_id: obsData.track_id,
-      camera_id: streamSource?.name || "Refinery Cam 1",
+      camera_id: streamSource?.cameraId || streamSource?.name || "Refinery Cam 1",
       zone_name: obsData.zone_name || "Walkway Area A",
       object_type: obsData.object_type || "person",
       bounding_box: obsData.bounding_box || [0.22, 0.28, 0.15, 0.48],
@@ -328,7 +354,7 @@ export function SafetyProvider({ children }) {
   // Save Restricted Zone ROI to SQLite
   const addRestrictedZone = async (zoneName, polygonCoords) => {
     await postRestrictedZoneApi({
-      camera_id: streamSource?.name || "CAM-LIVE",
+      camera_id: streamSource?.cameraId || streamSource?.name || "CAM-LIVE",
       zone_name: zoneName,
       polygon_coords: polygonCoords
     });

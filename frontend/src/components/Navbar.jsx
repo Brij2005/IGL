@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Leaf, ChevronDown, User, Activity } from "lucide-react";
+import { Leaf, ChevronDown } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 
 export default function Navbar() {
@@ -62,17 +62,7 @@ export default function Navbar() {
           <span className="text-[10px] text-slate-500 font-mono">{timeStr}</span>
         </div>
 
-        {/* User Admin Badge */}
-        <div className="flex items-center gap-2.5 pl-2 border-l border-slate-200">
-          <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-600">
-            <User className="w-4 h-4" />
-          </div>
-          <div className="hidden xl:block text-left">
-            <div className="font-bold text-[11px] text-slate-900 leading-tight">EHS Admin</div>
-            <div className="text-[10px] text-slate-500 font-medium leading-tight">Administrator</div>
-          </div>
         </div>
-      </div>
     </header>
   );
 }

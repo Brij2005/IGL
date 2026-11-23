@@ -1,6 +1,7 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 import sqlite3
 import json
@@ -9,10 +10,15 @@ import base64
 import math
 from datetime import datetime
 import os
+from urllib.parse import urlparse, urlunparse
 
 from database import init_db, get_db_connection
 from ai_engine import assess_frame_quality, is_point_in_polygon, calculate_distance
 from whatsapp_service import get_whatsapp_status_info, send_whatsapp_test, send_whatsapp_alert
+from api_routes import router as api_router
+from security_routes import router as security_router
+from config import ENABLE_AUTH
+from security import decode_access_token, ensure_admin_user, encrypt_secret, require_roles
 
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -32,13 +38,18 @@ class CameraRegistrationRequest(BaseModel):
     name: str = Field(default="Camera Input", min_length=1, max_length=100)
     source_type: str = Field(default="webcam")
     source_url: str = Field(default="")
+    username: str = Field(default="", max_length=200)
+    password: str = Field(default="", max_length=200)
+    plant_location_id: str | None = None
+    pipeline_id: str | None = None
+    config: dict = Field(default_factory=dict)
 
     @field_validator("source_type")
     @classmethod
     def validate_source_type(cls, value: str) -> str:
-        allowed = {"webcam", "rtsp", "file"}
+        allowed = {"webcam", "rtsp", "file", "image", "http", "onvif"}
         if value not in allowed:
-            raise ValueError("source_type must be one of: webcam, rtsp, file")
+            raise ValueError("source_type must be one of: webcam, rtsp, file, image, http, onvif")
         return value
 
 
@@ -142,7 +153,7 @@ class RegisteredPersonnelRequest(BaseModel):
         return descriptors
 
 
-app = FastAPI(title="IGL Industrial AI Safety Intelligence API", version="1.0.0")
+app = FastAPI(title="IGL Industrial AI Safety Intelligence API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -152,10 +163,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    if not ENABLE_AUTH or request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    # Only the JSON API is protected. Static SPA assets (scripts, styles, images)
+    # must remain publicly loadable so the login page itself can render.
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    public_paths = {"/api/auth/login", "/api/auth/logout", "/api/health"}
+    if path in public_paths:
+        return await call_next(request)
+    token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not token:
+        token = request.query_params.get("token", "")
+    if not token:
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+    try:
+        decode_access_token(token)
+    except HTTPException as exc:
+        return JSONResponse(status_code=401, content={"detail": exc.detail})
+    return await call_next(request)
+
 # Initialize Database on Startup
 @app.on_event("startup")
 def startup_event():
+    from config import validate_production_config
+    from logging_setup import get_logger, setup_logging
+
+    setup_logging()
+    logger = get_logger("igl.startup")
+
+    problems = validate_production_config()
+    if problems:
+        # Refuse to serve in production with unsafe settings.
+        logger.error("unsafe_production_configuration", extra={"problems": problems})
+        raise RuntimeError(
+            "Unsafe production configuration: " + "; ".join(problems)
+        )
     init_db()
+    ensure_admin_user()
+    logger.info(
+        "startup_complete",
+        extra={"environment": os.getenv("ENVIRONMENT", "development"), "auth_enabled": ENABLE_AUTH},
+    )
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    from logging_setup import get_logger
+
+    logger = get_logger("igl.shutdown")
+    # Stop all camera inference workers and release adapters cleanly.
+    try:
+        from camera_manager import camera_manager
+
+        camera_manager.stop_all()
+    except Exception as exc:
+        logger.warning("camera_worker_shutdown_failed", extra={"error": str(exc)})
+    logger.info("shutdown_complete")
+
+app.include_router(api_router, prefix="/api")
+app.include_router(security_router, prefix="/api")
 
 @app.get("/")
 def read_root():
@@ -231,29 +302,65 @@ def list_cameras():
     rows = cursor.fetchall()
     conn.close()
 
-    cameras = [dict(row) for row in rows]
+    cameras = []
+    for row in rows:
+        item = dict(row)
+        item.pop("credentials_json", None)
+        item["has_credentials"] = bool(row["credentials_json"] and row["credentials_json"] not in {"{}", "null"})
+        cameras.append(item)
     return cameras
 
 @app.post("/api/cameras")
-def register_camera(payload: CameraRegistrationRequest):
+def register_camera(payload: CameraRegistrationRequest, user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     cam_id = f"CAM-{uuid.uuid4().hex[:6].upper()}"
     now = datetime.now().isoformat()
+    source_url = payload.source_url
+    if payload.source_type in {"rtsp", "onvif"} and source_url:
+        parsed = urlparse(source_url)
+        if parsed.username or parsed.password:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+            source_url = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+            payload.username = payload.username or parsed.username or ""
+            payload.password = payload.password or parsed.password or ""
+
+    credentials = {}
+    if payload.username or payload.password:
+        credentials = {
+            "username": encrypt_secret(payload.username),
+            "password": encrypt_secret(payload.password),
+        }
 
     cursor.execute("""
-    INSERT INTO cameras (id, name, source_type, source_url, status, resolution, last_seen)
-    VALUES (?, ?, ?, ?, 'ONLINE', '1920x1080', ?)
-    """, (cam_id, payload.name, payload.source_type, payload.source_url, now))
+    INSERT INTO cameras (id, name, source_type, source_url, status, resolution, last_seen,
+        plant_location_id, pipeline_id, enabled, auto_reconnect, config_json, credentials_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'DISCONNECTED', '1920x1080', ?, ?, ?, 1, 1, ?, ?, ?, ?)
+    """, (
+        cam_id, payload.name, payload.source_type, source_url, now,
+        payload.plant_location_id, payload.pipeline_id,
+        json.dumps(payload.config or {}), json.dumps(credentials), now, now
+    ))
 
     conn.commit()
     conn.close()
 
-    return {"status": "SUCCESS", "camera": {"id": cam_id, "name": payload.name, "source_type": payload.source_type, "status": "ONLINE"}}
+    return {
+        "status": "SUCCESS",
+        "camera": {
+            "id": cam_id,
+            "name": payload.name,
+            "source_type": payload.source_type,
+            "status": "DISCONNECTED",
+            "has_credentials": bool(credentials),
+        },
+    }
 
 @app.put("/api/cameras/{camera_id}/status")
-def update_camera_status(camera_id: str, payload: CameraStatusUpdateRequest):
+def update_camera_status(camera_id: str, payload: CameraStatusUpdateRequest, user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -443,7 +550,7 @@ def get_alerts():
     return alerts
 
 @app.post("/api/alerts")
-def create_alert(payload: AlertCreateRequest):
+def create_alert(payload: AlertCreateRequest, user: dict = Depends(require_roles("admin", "operator"))):
     """
     Ingests a real detection alert generated from actual camera input processing.
     """
@@ -469,7 +576,7 @@ def create_alert(payload: AlertCreateRequest):
     return {"status": "SUCCESS", "alert_id": alert_id, "detected_at": now}
 
 @app.put("/api/alerts/{alert_id}/acknowledge")
-def acknowledge_alert(alert_id: str, payload: AlertAckRequest):
+def acknowledge_alert(alert_id: str, payload: AlertAckRequest, user: dict = Depends(require_roles("admin", "operator"))):
     now = datetime.now().isoformat()
 
     conn = get_db_connection()
@@ -477,9 +584,14 @@ def acknowledge_alert(alert_id: str, payload: AlertAckRequest):
 
     cursor.execute("""
     UPDATE alerts 
-    SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?
+    SET status = 'ACKNOWLEDGED', acknowledged_at = ?, acknowledged_by = ?, updated_at = ?
     WHERE id = ?
-    """, (now, payload.user, alert_id))
+    """, (now, payload.user, now, alert_id))
+
+    cursor.execute("""
+    INSERT INTO alert_history (alert_id, action, actor, details_json)
+    VALUES (?, 'ACKNOWLEDGED', ?, ?)
+    """, (alert_id, payload.user, json.dumps({"time": now})))
 
     conn.commit()
     conn.close()
@@ -487,7 +599,7 @@ def acknowledge_alert(alert_id: str, payload: AlertAckRequest):
     return {"status": "ACKNOWLEDGED", "alert_id": alert_id, "time": now}
 
 @app.put("/api/alerts/{alert_id}/resolve")
-def resolve_alert(alert_id: str, payload: AlertResolveRequest):
+def resolve_alert(alert_id: str, payload: AlertResolveRequest, user: dict = Depends(require_roles("admin", "operator"))):
     now = datetime.now().isoformat()
 
     conn = get_db_connection()
@@ -495,9 +607,14 @@ def resolve_alert(alert_id: str, payload: AlertResolveRequest):
 
     cursor.execute("""
     UPDATE alerts 
-    SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, resolution_notes = ?
+    SET status = 'RESOLVED', resolved_at = ?, resolved_by = ?, resolution_notes = ?, updated_at = ?
     WHERE id = ?
-    """, (now, payload.user, payload.notes, alert_id))
+    """, (now, payload.user, payload.notes, now, alert_id))
+
+    cursor.execute("""
+    INSERT INTO alert_history (alert_id, action, actor, details_json)
+    VALUES (?, 'RESOLVED', ?, ?)
+    """, (alert_id, payload.user, json.dumps({"time": now, "notes": payload.notes})))
 
     conn.commit()
     conn.close()
@@ -518,7 +635,7 @@ def get_observations():
     return [dict(row) for row in rows]
 
 @app.post("/api/observations")
-def record_observation(payload: ObservationCreateRequest):
+def record_observation(payload: ObservationCreateRequest, user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -623,11 +740,14 @@ def get_restricted_zones(camera_id: str = None):
     return zones
 
 @app.post("/api/restricted-zones")
-def create_restricted_zone(payload: dict = Body(...)):
+def create_restricted_zone(payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     camera_id = payload.get("camera_id")
     zone_name = payload.get("zone_name", "Restricted Area")
     polygon_coords = payload.get("polygon_coords", []) # [[x, y], ...]
+    if not camera_id or not isinstance(polygon_coords, list) or len(polygon_coords) < 3:
+        raise HTTPException(status_code=422, detail="camera_id and at least three polygon points are required")
 
+    zone_id = payload.get("id") or f"RZONE-{uuid.uuid4().hex[:8].upper()}"
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -636,10 +756,15 @@ def create_restricted_zone(payload: dict = Body(...)):
     VALUES (?, ?, ?)
     """, (camera_id, zone_name, json.dumps(polygon_coords)))
 
+    cursor.execute("""
+    INSERT INTO monitoring_zones (id, camera_id, zone_name, zone_type, polygon_coords, color, model_ids, settings_json)
+    VALUES (?, ?, ?, 'RESTRICTED', ?, ?, '[]', '{}')
+    """, (zone_id, camera_id, zone_name, json.dumps(polygon_coords), payload.get("color", "#ef4444")))
+
     conn.commit()
     conn.close()
 
-    return {"status": "SUCCESS", "message": "Restricted zone saved to SQLite database"}
+    return {"status": "SUCCESS", "zone_id": zone_id, "message": "Restricted zone saved to SQLite database"}
 
 # ----------------------------------------------------
 # ANALYTICS ENDPOINT (Strictly calculated from DB)
@@ -691,7 +816,7 @@ def get_personnel_monitoring_rules():
     return [dict(row) for row in rows]
 
 @app.post("/api/personnel-monitoring/rules")
-def create_personnel_monitoring_rule(payload: dict = Body(...)):
+def create_personnel_monitoring_rule(payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -725,7 +850,7 @@ def create_personnel_monitoring_rule(payload: dict = Body(...)):
     return {"status": "SUCCESS", "rule_id": rule_id, "message": "Personnel monitoring schedule rule created"}
 
 @app.put("/api/personnel-monitoring/rules/{rule_id}")
-def update_personnel_monitoring_rule(rule_id: int, payload: dict = Body(...)):
+def update_personnel_monitoring_rule(rule_id: int, payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -757,7 +882,7 @@ def update_personnel_monitoring_rule(rule_id: int, payload: dict = Body(...)):
     return {"status": "SUCCESS", "rule_id": rule_id, "message": "Personnel monitoring rule updated"}
 
 @app.delete("/api/personnel-monitoring/rules/{rule_id}")
-def delete_personnel_monitoring_rule(rule_id: int):
+def delete_personnel_monitoring_rule(rule_id: int, user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM personnel_monitoring_rules WHERE id = ?", (rule_id,))
@@ -786,7 +911,7 @@ def get_personnel_monitoring_events():
     return events
 
 @app.post("/api/personnel-monitoring/events")
-def create_personnel_monitoring_event(payload: dict = Body(...)):
+def create_personnel_monitoring_event(payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -843,7 +968,7 @@ def create_personnel_monitoring_event(payload: dict = Body(...)):
     return {"status": "SUCCESS", "event_id": event_id, "alert_id": alert_id, "timestamp": now}
 
 @app.put("/api/personnel-monitoring/events/{event_id}/acknowledge")
-def acknowledge_personnel_monitoring_event(event_id: str, payload: dict = Body(...)):
+def acknowledge_personnel_monitoring_event(event_id: str, payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     user = payload.get("user", "Controller / Safety Officer")
     now = datetime.now().isoformat()
 
@@ -869,7 +994,7 @@ def acknowledge_personnel_monitoring_event(event_id: str, payload: dict = Body(.
     return {"status": "ACKNOWLEDGED", "event_id": event_id, "time": now}
 
 @app.put("/api/personnel-monitoring/events/{event_id}/resolve")
-def resolve_personnel_monitoring_event(event_id: str, payload: dict = Body(...)):
+def resolve_personnel_monitoring_event(event_id: str, payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     user = payload.get("user", "Safety Manager")
     notes = payload.get("notes", "Personnel count verified and anomaly resolved.")
     now = datetime.now().isoformat()
@@ -908,7 +1033,7 @@ def get_expected_personnel_rules():
     return [dict(row) for row in rows]
 
 @app.post("/api/expected-personnel/rules")
-def create_expected_personnel_rule(payload: dict = Body(...)):
+def create_expected_personnel_rule(payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -942,7 +1067,7 @@ def create_expected_personnel_rule(payload: dict = Body(...)):
     return {"status": "SUCCESS", "rule_id": rule_id, "message": "Expected Personnel Rule saved successfully"}
 
 @app.put("/api/expected-personnel/rules/{rule_id}")
-def update_expected_personnel_rule(rule_id: int, payload: dict = Body(...)):
+def update_expected_personnel_rule(rule_id: int, payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -976,7 +1101,7 @@ def update_expected_personnel_rule(rule_id: int, payload: dict = Body(...)):
     return {"status": "SUCCESS", "rule_id": rule_id, "message": "Expected Personnel Rule updated successfully"}
 
 @app.delete("/api/expected-personnel/rules/{rule_id}")
-def delete_expected_personnel_rule(rule_id: int):
+def delete_expected_personnel_rule(rule_id: int, user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM expected_personnel_rules WHERE id = ?", (rule_id,))
@@ -996,7 +1121,7 @@ def get_whatsapp_status():
     return get_whatsapp_status_info()
 
 @app.post("/api/notifications/whatsapp/test")
-def test_whatsapp_notification(payload: dict = Body({})):
+def test_whatsapp_notification(payload: dict = Body({}), user: dict = Depends(require_roles("admin", "operator"))):
     """
     Triggered by [Test WhatsApp Alert] button in settings.
     In mock mode: logs message to terminal and returns SIMULATED status.
@@ -1093,7 +1218,7 @@ def list_registered_personnel():
     return personnel
 
 @app.post("/api/registered-personnel")
-def create_registered_person(payload: RegisteredPersonnelRequest):
+def create_registered_person(payload: RegisteredPersonnelRequest, user: dict = Depends(require_roles("admin", "operator"))):
     person_id = payload.id
     track_id = payload.track_id
     name = payload.name
@@ -1132,7 +1257,7 @@ def create_registered_person(payload: RegisteredPersonnelRequest):
     }
 
 @app.put("/api/registered-personnel/{person_id}")
-def update_registered_person(person_id: str, payload: dict = Body(...)):
+def update_registered_person(person_id: str, payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
     name = payload.get("name")
     track_id = payload.get("track_id")
     designation = payload.get("designation")
@@ -1169,13 +1294,16 @@ def update_registered_person(person_id: str, payload: dict = Body(...)):
     return {"status": "SUCCESS", "id": person_id}
 
 @app.delete("/api/registered-personnel/{person_id}")
-def delete_registered_person(person_id: str):
+def delete_registered_person(person_id: str, user: dict = Depends(require_roles("admin", "operator"))):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM registered_personnel WHERE id = ?", (person_id,))
     conn.commit()
     conn.close()
     return {"status": "SUCCESS", "id": person_id}
+
+if os.path.isdir("static"):
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn

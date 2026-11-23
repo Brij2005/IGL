@@ -1,0 +1,90 @@
+# IGL VisionGuard - full stack
+#
+# Quick start (development, auth disabled):
+#   cp backend/.env.example backend/.env   # set ENABLE_AUTH=false locally
+#   docker compose up --build
+#
+# Production:
+#   cp backend/.env.production.example backend/.env   # ENABLE_AUTH=true, strong secrets
+#   export SECRET_KEY=... ADMIN_PASSWORD=...
+#   docker compose up -d --build
+#
+# Compose refuses to start without a strong SECRET_KEY and ADMIN_PASSWORD.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: igl-visionguard-backend:latest
+    container_name: igl-backend
+    restart: unless-stopped
+    env_file:
+      - backend/.env
+    environment:
+      # Defaults are safe: authentication is enabled unless explicitly disabled.
+      ENABLE_AUTH: ${ENABLE_AUTH:-true}
+      SECRET_KEY: ${SECRET_KEY:?set a strong SECRET_KEY (min 32 chars)}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set a strong ADMIN_PASSWORD (min 12 chars)}
+      DATABASE_PATH: /data/igl_safety.db
+      EVIDENCE_DIR: /data/evidence
+      REPORTS_DIR: /data/reports
+      MODEL_DIR: /app/models
+      IGL_DATA_DIR: /data
+      YOLO_MODEL_PATH: /app/models/yolov8n.pt
+      LEAKAGE_BASE_WEIGHTS: /app/models/yolov8n.pt
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+    volumes:
+      - igl-data:/data
+      - igl-models:/app/models
+    expose:
+      - "8000"
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE: /api
+    image: igl-visionguard-frontend:latest
+    container_name: igl-frontend
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  igl-data:
+    name: igl-data
+  igl-models:
+    name: igl-models
