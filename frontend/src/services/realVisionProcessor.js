@@ -632,6 +632,203 @@ let liveCameraLeakageConsecutiveFrames = 0;
  *   details: string
  * }
  */
+/**
+ * Detect whether an actual pipe-like structure is visible in the frame.
+ *
+ * IMPORTANT: this is a deterministic pixel-structure heuristic, NOT a trained
+ * model and NOT a classifier. It looks for the characteristic signature of a
+ * cylindrical pipe under directional light: two long, roughly parallel
+ * high-gradient edges with a brighter band between them. When no such structure
+ * exists it reports `pipeVisible: false`, which lets callers refuse to make any
+ * pipe-specific claim instead of guessing.
+ *
+ * @param {CanvasImageSource} sourceElem
+ * @param {{region?: [number,number,number,number]}} [options]
+ *        `region` is an optional operator-configured normalized ROI [x,y,w,h].
+ *        When supplied, only that part of the frame is searched.
+ * @returns {{pipeVisible:boolean, confidence:number, region:number[]|null,
+ *            axis:string|null, reason:string, signals:object}}
+ */
+export function detectPipeContext(sourceElem, options = {}) {
+  const empty = {
+    pipeVisible: false,
+    confidence: 0,
+    region: null,
+    axis: null,
+    reason: "No pipe-like structure found",
+    signals: { edgeSupport: 0, parallelSupport: 0, highlightStrength: 0 }
+  };
+
+  if (!sourceElem) return { ...empty, reason: "No source element" };
+
+  try {
+    const srcW = sourceElem.videoWidth || sourceElem.naturalWidth || sourceElem.width || 0;
+    const srcH = sourceElem.videoHeight || sourceElem.naturalHeight || sourceElem.height || 0;
+    if (!srcW || !srcH) return { ...empty, reason: "Invalid source dimensions" };
+
+    const W = 320;
+    const H = Math.max(80, Math.round((srcH / srcW) * W) || 180);
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(sourceElem, 0, 0, W, H);
+    const { data } = ctx.getImageData(0, 0, W, H);
+
+    // Optional operator-configured ROI, in source-normalized coordinates.
+    let rx0 = 0, ry0 = 0, rx1 = W, ry1 = H;
+    const region = options.region;
+    if (Array.isArray(region) && region.length === 4) {
+      rx0 = Math.max(0, Math.floor(region[0] * W));
+      ry0 = Math.max(0, Math.floor(region[1] * H));
+      rx1 = Math.min(W, Math.ceil((region[0] + region[2]) * W));
+      ry1 = Math.min(H, Math.ceil((region[1] + region[3]) * H));
+      if (rx1 - rx0 < 24 || ry1 - ry0 < 24) {
+        return { ...empty, reason: "Configured inspection region is too small" };
+      }
+    }
+
+    // Luminance + gradient magnitude
+    const lum = new Float32Array(W * H);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      lum[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+    const grad = new Float32Array(W * H);
+    for (let y = ry0 + 1; y < ry1 - 1; y++) {
+      for (let x = rx0 + 1; x < rx1 - 1; x++) {
+        const p = y * W + x;
+        const gx = Math.abs(lum[p + 1] - lum[p - 1]);
+        const gy = Math.abs(lum[p + W] - lum[p - W]);
+        grad[p] = gx + gy;
+      }
+    }
+
+    const EDGE = 26;
+    // Per-row and per-column edge support inside the ROI
+    const rowEdge = new Float32Array(H);
+    const colEdge = new Float32Array(W);
+    const rowLum = new Float32Array(H);
+    const colLum = new Float32Array(W);
+    for (let y = ry0; y < ry1; y++) {
+      let rc = 0, rl = 0;
+      for (let x = rx0; x < rx1; x++) {
+        const p = y * W + x;
+        if (grad[p] > EDGE) rc++;
+        rl += lum[p];
+      }
+      rowEdge[y] = rc;
+      rowLum[y] = rl / Math.max(1, rx1 - rx0);
+    }
+    for (let x = rx0; x < rx1; x++) {
+      let cc = 0, cl = 0;
+      for (let y = ry0; y < ry1; y++) {
+        const p = y * W + x;
+        if (grad[p] > EDGE) cc++;
+        cl += lum[p];
+      }
+      colEdge[x] = cc;
+      colLum[x] = cl / Math.max(1, ry1 - ry0);
+    }
+
+    const spanX = rx1 - rx0;
+    const spanY = ry1 - ry0;
+    const minGap = 8;
+    const maxGapH = Math.min(110, Math.floor(spanY * 0.55));
+    const maxGapV = Math.min(110, Math.floor(spanX * 0.55));
+
+    // A pipe edge line must span most of the ROI (long, straight structure).
+    const minRowSupport = spanX * 0.42;
+    const minColSupport = spanY * 0.42;
+
+    let best = { score: 0, axis: null, a: 0, b: 0, edgeSupport: 0, highlight: 0 };
+
+    // Horizontal pipe: two long horizontal edges with a brighter band between
+    for (let y1 = ry0; y1 < ry1 - minGap; y1++) {
+      if (rowEdge[y1] < minRowSupport) continue;
+      for (let y2 = y1 + minGap; y2 < Math.min(ry1, y1 + maxGapH); y2++) {
+        if (rowEdge[y2] < minRowSupport) continue;
+        let inside = 0, n = 0;
+        for (let y = y1 + 1; y < y2; y++) { inside += rowLum[y]; n++; }
+        const insideLum = n ? inside / n : 0;
+        let outside = 0, m = 0;
+        for (let y = ry0; y < ry1; y++) {
+          if (y > y1 && y < y2) continue;
+          outside += rowLum[y]; m++;
+        }
+        const outsideLum = m ? outside / m : 0;
+        const highlight = outsideLum > 0 ? insideLum / outsideLum : 0;
+        const edgeSupport = Math.min(rowEdge[y1], rowEdge[y2]) / spanX;
+        const score = edgeSupport * Math.min(1.6, highlight);
+        if (score > best.score) {
+          best = { score, axis: "horizontal", a: y1, b: y2, edgeSupport, highlight };
+        }
+      }
+    }
+
+    // Vertical pipe: same test rotated
+    for (let x1 = rx0; x1 < rx1 - minGap; x1++) {
+      if (colEdge[x1] < minColSupport) continue;
+      for (let x2 = x1 + minGap; x2 < Math.min(rx1, x1 + maxGapV); x2++) {
+        if (colEdge[x2] < minColSupport) continue;
+        let inside = 0, n = 0;
+        for (let x = x1 + 1; x < x2; x++) { inside += colLum[x]; n++; }
+        const insideLum = n ? inside / n : 0;
+        let outside = 0, m = 0;
+        for (let x = rx0; x < rx1; x++) {
+          if (x > x1 && x < x2) continue;
+          outside += colLum[x]; m++;
+        }
+        const outsideLum = m ? outside / m : 0;
+        const highlight = outsideLum > 0 ? insideLum / outsideLum : 0;
+        const edgeSupport = Math.min(colEdge[x1], colEdge[x2]) / spanY;
+        const score = edgeSupport * Math.min(1.6, highlight);
+        if (score > best.score) {
+          best = { score, axis: "vertical", a: x1, b: x2, edgeSupport, highlight };
+        }
+      }
+    }
+
+    // Require both long parallel edges AND a brighter band between them.
+    const MIN_SCORE = 0.86;
+    if (best.score < MIN_SCORE || best.edgeSupport < 0.42 || best.highlight < 1.06) {
+      return {
+        ...empty,
+        reason: best.edgeSupport >= 0.42
+          ? "Parallel edges found but no cylindrical pipe profile"
+          : "No long parallel pipe edges found",
+        signals: {
+          edgeSupport: Math.round(best.edgeSupport * 100) / 100,
+          parallelSupport: 0,
+          highlightStrength: Math.round(best.highlight * 100) / 100
+        }
+      };
+    }
+
+    // Pipe region = the band between the two edges, full span on the other axis
+    let regionNorm;
+    if (best.axis === "horizontal") {
+      regionNorm = [rx0 / W, best.a / H, spanX / W, Math.max(6, best.b - best.a) / H];
+    } else {
+      regionNorm = [best.a / W, ry0 / H, Math.max(6, best.b - best.a) / W, spanY / H];
+    }
+
+    return {
+      pipeVisible: true,
+      confidence: Math.round(Math.min(0.99, best.score / 1.6) * 100) / 100,
+      region: regionNorm,
+      axis: best.axis,
+      reason: "Pipe-like cylindrical structure detected",
+      signals: {
+        edgeSupport: Math.round(best.edgeSupport * 100) / 100,
+        parallelSupport: Math.round(Math.min(1, best.highlight / 1.6) * 100) / 100,
+        highlightStrength: Math.round(best.highlight * 100) / 100
+      }
+    };
+  } catch (err) {
+    return { ...empty, reason: `Pipe context analysis failed: ${err.message}` };
+  }
+}
+
 export function detectPipeLeakage(sourceElem, options = {}) {
   const source = options.source || "UPLOADED_IMAGE";
 
@@ -697,9 +894,61 @@ export function detectPipeLeakage(sourceElem, options = {}) {
       };
     }
 
-    // 2. VISUAL WATER SPRAY / LIQUID JET PATTERN COMPUTER VISION ANALYSIS
+    // 2. PIPE CONTEXT VALIDATION
+    // A pipe-related verdict is only admissible when an actual pipe-like
+    // structure is visible. Without pipe context we must not claim a pipe leak,
+    // no matter what the pixel statistics look like.
+    const pipeCtx = detectPipeContext(sourceElem, { region: options.pipeRegion });
+
+    if (!pipeCtx.pipeVisible) {
+      liveCameraLeakageConsecutiveFrames = 0;
+      return {
+        detected: false,
+        confidence: 0,
+        type: "VISIBLE_PIPE_LEAKAGE",
+        evidence_region: null,
+        pipe_context: pipeCtx,
+        pipe_detected: false,
+        source,
+        status: "NO_PIPE_DETECTED",
+        qualityCheck: {
+          passed: true,
+          reason: "OK",
+          brightness: quality.brightness,
+          blurScore: quality.blurScore
+        },
+        details: "PIPE NOT VISIBLE – CHECK CAMERA POSITION. No pipe-like structure was found in this view, so no pipe leakage can be reported.",
+        operator_message: "PIPE NOT VISIBLE – CHECK CAMERA POSITION"
+      };
+    }
+
+    // 3. VISUAL WATER SPRAY / LIQUID JET PATTERN COMPUTER VISION ANALYSIS
     const imgData = ctx.getImageData(0, 0, sampleWidth, sampleHeight);
     const data = imgData.data;
+
+    // Restrict spray analysis to the identified pipe region AND its immediate
+    // surroundings. A leak originates at the pipe or just outside it, so a
+    // margin is included to capture the escaping jet, while bright or textured
+    // areas elsewhere in the scene (clothing, walls, furniture) can never be
+    // attributed to the pipe.
+    const pr = pipeCtx.region || [0, 0, 1, 1];
+    const pipeLeft = pr[0] * sampleWidth;
+    const pipeTop = pr[1] * sampleHeight;
+    const pipeRight = (pr[0] + pr[2]) * sampleWidth;
+    const pipeBottom = (pr[1] + pr[3]) * sampleHeight;
+    const bandHeight = Math.max(1, pipeBottom - pipeTop);
+    const bandWidth = Math.max(1, pipeRight - pipeLeft);
+    // An escaping jet extends outwards from the pipe surface, so the search band
+    // covers the pipe plus a generous margin around it. Distant scene regions
+    // (clothing, walls, furniture) remain excluded.
+    const marginY = Math.max(24, bandHeight * 1.5);
+    const marginX = Math.max(16, bandWidth * 0.2);
+
+    const px0 = Math.max(1, Math.floor(pipeLeft - marginX));
+    const py0 = Math.max(1, Math.floor(pipeTop - marginY));
+    const px1 = Math.min(sampleWidth - 1, Math.ceil(pipeRight + marginX));
+    const py1 = Math.min(sampleHeight - 1, Math.ceil(pipeBottom + marginY));
+    const regionPixelCount = Math.max(1, (px1 - px0) * (py1 - py0));
 
     let detectedSprayPixels = 0;
     const gridCols = 16;
@@ -710,44 +959,73 @@ export function detectPipeLeakage(sourceElem, options = {}) {
 
     let minX = sampleWidth, minY = sampleHeight, maxX = 0, maxY = 0;
 
-    for (let y = 1; y < sampleHeight - 1; y++) {
-      for (let x = 1; x < sampleWidth - 1; x++) {
-        const idx = (y * sampleWidth + x) * 4;
+    // Pre-compute luminance for the whole sample so a local-contrast test can
+    // distinguish small-scale spray droplets from a smooth specular highlight.
+    // A clean glossy pipe has a large, contiguous bright band; genuine spray is
+    // made of many small bright features surrounded by darker pixels.
+    const lumMap = new Float32Array(sampleWidth * sampleHeight);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      lumMap[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+
+    const NEIGHBOUR_RADIUS = 2;
+    // A spray droplet is a small bright feature on a darker background. A value
+    // of 0.6 still rejects smooth bright regions (a specular highlight or a lit
+    // pipe body has a local bright ratio near 1.0) while accepting genuine
+    // scattered droplets.
+    const LOCAL_BRIGHT_LIMIT = 0.6;
+
+    for (let y = py0; y < py1; y++) {
+      for (let x = px0; x < px1; x++) {
+        const p = y * sampleWidth + x;
+        const idx = p * 4;
         const r = data[idx];
         const g = data[idx + 1];
         const b = data[idx + 2];
 
-        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const lum = lumMap[p];
+        if (lum <= 135) continue;
 
-        // Calculate 4-neighbor spatial luminance gradient
-        const idxLeft = (y * sampleWidth + (x - 1)) * 4;
-        const idxRight = (y * sampleWidth + (x + 1)) * 4;
-        const idxUp = ((y - 1) * sampleWidth + x) * 4;
-        const idxDown = ((y + 1) * sampleWidth + x) * 4;
-
-        const lumLeft = 0.299 * data[idxLeft] + 0.587 * data[idxLeft + 1] + 0.114 * data[idxLeft + 2];
-        const lumRight = 0.299 * data[idxRight] + 0.587 * data[idxRight + 1] + 0.114 * data[idxRight + 2];
-        const lumUp = 0.299 * data[idxUp] + 0.587 * data[idxUp + 1] + 0.114 * data[idxUp + 2];
-        const lumDown = 0.299 * data[idxDown] + 0.587 * data[idxDown + 1] + 0.114 * data[idxDown + 2];
-
+        // 4-neighbor spatial luminance gradient
+        const lumLeft = lumMap[p - 1];
+        const lumRight = lumMap[p + 1];
+        const lumUp = lumMap[p - sampleWidth];
+        const lumDown = lumMap[p + sampleWidth];
         const gradMag = Math.abs(lumRight - lumLeft) + Math.abs(lumDown - lumUp);
+        if (gradMag <= 20) continue;
 
-        // Water jet spray characteristics:
-        // Fluid spray misting & fine droplets reflecting light against background (lum > 135, gradMag > 20, neutral mist color)
-        const isWaterSprayPixel = lum > 135 && gradMag > 20 && Math.abs(r - g) < 35 && Math.abs(g - b) < 35;
+        // Neutral colour only (rules out strongly coloured objects)
+        if (Math.abs(r - g) >= 35 || Math.abs(g - b) >= 35) continue;
 
-        if (isWaterSprayPixel) {
-          detectedSprayPixels++;
-          minX = Math.min(minX, x);
-          minY = Math.min(minY, y);
-          maxX = Math.max(maxX, x);
-          maxY = Math.max(maxY, y);
-
-          const cCol = Math.floor(x / cellW);
-          const cRow = Math.floor(y / cellH);
-          if (cCol >= 0 && cCol < gridCols && cRow >= 0 && cRow < gridRows) {
-            gridSprayDensity[cRow * gridCols + cCol]++;
+        // Local-contrast test: a spray droplet is a small bright feature on a
+        // darker background. If most of the neighbourhood is also bright, this
+        // is a smooth highlight / surface, not spray.
+        let brightNeighbours = 0;
+        let samples = 0;
+        for (let dy = -NEIGHBOUR_RADIUS; dy <= NEIGHBOUR_RADIUS; dy++) {
+          const yy = y + dy;
+          if (yy < py0 || yy >= py1) continue;
+          for (let dx = -NEIGHBOUR_RADIUS; dx <= NEIGHBOUR_RADIUS; dx++) {
+            const xx = x + dx;
+            if (xx < px0 || xx >= px1) continue;
+            if (lumMap[yy * sampleWidth + xx] > 135) brightNeighbours++;
+            samples++;
           }
+        }
+        const localBrightRatio = samples ? brightNeighbours / samples : 0;
+        if (localBrightRatio >= LOCAL_BRIGHT_LIMIT) continue;
+
+        // Accepted as a spray/mist candidate
+        detectedSprayPixels++;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+
+        const cCol = Math.floor(x / cellW);
+        const cRow = Math.floor(y / cellH);
+        if (cCol >= 0 && cCol < gridCols && cRow >= 0 && cRow < gridRows) {
+          gridSprayDensity[cRow * gridCols + cCol]++;
         }
       }
     }
@@ -762,11 +1040,22 @@ export function detectPipeLeakage(sourceElem, options = {}) {
       }
     }
 
-    const totalPixels = sampleWidth * sampleHeight;
-    const sprayRatio = detectedSprayPixels / totalPixels;
+    // Density is measured against the pipe region plus margin, not the whole frame.
+    const sprayRatio = detectedSprayPixels / regionPixelCount;
 
-    // Check for water spray jetting pattern (concentrated high-brightness spray clusters along pipe regions)
-    const frameHasSprayPattern = (sprayRatio >= 0.012 && activeSprayCells >= 3 && maxCellDensity >= 10);
+    // A spray/leak jet is a CONCENTRATED cluster of small bright features, so the
+    // decision is driven by concentration (active cells and peak cell density)
+    // rather than by the fraction of the whole search band covered. The ratio is
+    // kept only as a sanity floor so a handful of stray pixels cannot trigger it.
+    const MIN_SPRAY_RATIO = 0.002;
+    const MIN_ACTIVE_CELLS = 3;
+    const MIN_PEAK_DENSITY = 12;
+
+    const frameHasSprayPattern = (
+      sprayRatio >= MIN_SPRAY_RATIO &&
+      activeSprayCells >= MIN_ACTIVE_CELLS &&
+      maxCellDensity >= MIN_PEAK_DENSITY
+    );
 
     if (source === "LIVE_CAMERA") {
       if (frameHasSprayPattern) {
@@ -787,14 +1076,23 @@ export function detectPipeLeakage(sourceElem, options = {}) {
       const normW = Math.max(0.20, Math.min(1 - normX, (maxX - minX + 20) / sampleWidth));
       const normH = Math.max(0.20, Math.min(1 - normY, (maxY - minY + 20) / sampleHeight));
 
-      let rawConfidence = 0.84 + Math.min(0.12, (sprayRatio * 2.5) + (activeSprayCells / 30.0));
-      rawConfidence = Math.round(rawConfidence * 100) / 100;
+      // Confidence is COMPUTED from measurable evidence and deliberately capped.
+      // This is a pixel heuristic, not a trained model, so it must never present
+      // a trained-model style 0.85+ probability for a "confirmed" defect.
+      const spraySignal = Math.min(1, sprayRatio / 0.06);
+      const clusterSignal = Math.min(1, activeSprayCells / 8);
+      const pipeSignal = Math.min(1, pipeCtx.confidence);
+      const rawConfidence = 0.35 + 0.25 * spraySignal + 0.20 * clusterSignal + 0.15 * pipeSignal;
+      const confidence = Math.round(Math.min(0.75, Math.max(0.35, rawConfidence)) * 100) / 100;
 
       return {
         detected: true,
-        confidence: Math.min(0.96, Math.max(0.85, rawConfidence)),
+        confidence,
+        confidence_source: "PIXEL_HEURISTIC_NOT_A_TRAINED_MODEL",
         type: "VISIBLE_PIPE_LEAKAGE",
         evidence_region: [normX, normY, normW, normH],
+        pipe_context: pipeCtx,
+        pipe_detected: true,
         source,
         status: "REVIEW_REQUIRED",
         qualityCheck: {
@@ -803,9 +1101,37 @@ export function detectPipeLeakage(sourceElem, options = {}) {
           brightness: quality.brightness,
           blurScore: quality.blurScore
         },
-        details: "Visible liquid escaping from pipe/joint. High-velocity water spray jet pattern identified."
+        details: "Possible liquid spray pattern inside the detected pipe region. Unconfirmed heuristic result – human verification required.",
+        operator_message: "POSSIBLE PIPE LEAKAGE – HUMAN REVIEW REQUIRED"
       };
     }
+
+    // Pipe is visible but no spray pattern inside it.
+    return {
+      detected: false,
+      confidence: 0,
+      type: "VISIBLE_PIPE_LEAKAGE",
+      evidence_region: null,
+      pipe_context: pipeCtx,
+      pipe_detected: true,
+      source,
+      status: "NO_LEAKAGE",
+      qualityCheck: {
+        passed: true,
+        reason: "OK",
+        brightness: quality.brightness,
+        blurScore: quality.blurScore
+      },
+      details: "Pipe structure visible; no liquid spray pattern detected inside the pipe region.",
+      operator_message: "PIPE VISIBLE – NO LEAKAGE DETECTED",
+      diagnostics: {
+        sprayPixels: detectedSprayPixels,
+        sprayRatio: Math.round(sprayRatio * 10000) / 10000,
+        activeSprayCells,
+        maxCellDensity,
+        regionPixels: regionPixelCount
+      }
+    };
 
     // No leakage pattern detected
     return {

@@ -297,27 +297,34 @@ export default function PipeInspectionView() {
 
             // 1. Dedicated Computer Vision Pipe Leakage Analysis
             const leakRes = detectPipeLeakage(sourceElem, {
-              source: inputMode === "image" ? "UPLOADED_IMAGE" : "LIVE_CAMERA"
+              source: inputMode === "image" ? "UPLOADED_IMAGE" : "LIVE_CAMERA",
+              pipeRegion: config.pipeRegion
             });
             setLeakageResult(leakRes);
 
-            if (leakRes && leakRes.detected && leakRes.confidence >= 0.75) {
+            // A pipe-related alert requires BOTH an identified pipe region AND a
+            // spray pattern inside it. Without pipe context the verdict is
+            // NO_PIPE_DETECTED and nothing is dispatched.
+            const hasPipeContext = Boolean(leakRes && leakRes.pipe_detected);
+            if (leakRes && leakRes.detected && hasPipeContext && leakRes.confidence >= 0.35) {
               if (!leakageAlertDispatchedRef.current) {
                 leakageAlertDispatchedRef.current = true;
-                const snapBase64 = captureCanvasSnapshot(canvas, "VISIBLE PIPE LEAKAGE DETECTED");
+                const snapBase64 = captureCanvasSnapshot(canvas, "POSSIBLE PIPE LEAKAGE - HUMAN REVIEW REQUIRED");
                 dispatchAlert({
-                  event_type: "VISIBLE_PIPE_LEAKAGE",
+                  event_type: "POSSIBLE_PIPE_LEAKAGE_REVIEW",
                   zone_name: inputMode === "image" ? `Uploaded Image (${uploadedFileName || "Pipe Scan"})` : "Live Pipe Scanner",
-                  severity: "HIGH",
+                  severity: "MEDIUM",
                   confidence: leakRes.confidence,
                   evidence_image_base64: snapBase64,
                   metadata: {
                     source: inputMode,
-                    leakage_type: "VISIBLE_PIPE_LEAKAGE",
+                    leakage_type: "POSSIBLE_PIPE_LEAKAGE",
                     confidence: leakRes.confidence,
+                    confidence_source: leakRes.confidence_source || "PIXEL_HEURISTIC",
                     evidence_region: leakRes.evidence_region,
+                    pipe_context: leakRes.pipe_context,
                     status: "REVIEW_REQUIRED",
-                    description: "Visible liquid leakage detected from pipe/joint. Human verification required."
+                    description: "Unconfirmed spray-like pattern inside a detected pipe region. Heuristic result, not a trained-model detection. Human verification required."
                   }
                 });
               }
@@ -494,21 +501,21 @@ export default function PipeInspectionView() {
                   const lh = normH * height;
 
                   ctx.save();
-                  ctx.strokeStyle = "#ef4444";
+                  ctx.strokeStyle = "#f59e0b";
                   ctx.lineWidth = 3.5;
                   ctx.setLineDash([8, 4]);
                   ctx.strokeRect(lx, ly, lw, lh);
 
-                  ctx.fillStyle = "rgba(239, 68, 68, 0.22)";
+                  ctx.fillStyle = "rgba(245, 158, 11, 0.18)";
                   ctx.fillRect(lx, ly, lw, lh);
 
-                  ctx.fillStyle = "#ef4444";
-                  const pillW = Math.max(220, Math.round(lw * 0.75));
+                  ctx.fillStyle = "#f59e0b";
+                  const pillW = Math.max(240, Math.round(lw * 0.85));
                   ctx.fillRect(lx, Math.max(0, ly - 24), pillW, 22);
 
                   ctx.fillStyle = "#ffffff";
                   ctx.font = "bold 11px sans-serif";
-                  ctx.fillText(`🔴 VISIBLE PIPE LEAKAGE (${Math.round(leakRes.confidence * 100)}%)`, lx + 6, Math.max(14, ly - 8));
+                  ctx.fillText(`⚠ POSSIBLE LEAK – REVIEW (${Math.round((leakRes.confidence || 0) * 100)}%)`, lx + 6, Math.max(14, ly - 8));
                   ctx.restore();
                 }
               })
@@ -563,14 +570,25 @@ export default function PipeInspectionView() {
   };
 
   if (leakageResult && leakageResult.detected) {
+    // Heuristic result only — never presented as a confirmed trained-model detection.
     safetyResult = {
-      status: "LEAKAGE_DETECTED",
-      color: "red",
-      bg: "bg-red-500/10",
-      border: "border-red-500/30",
-      text: "text-red-400",
-      title: "🔴 VISIBLE PIPE LEAKAGE DETECTED",
-      sub: "Active liquid spray escaping from pipe/joint. Human verification required."
+      status: "REVIEW_REQUIRED",
+      color: "amber",
+      bg: "bg-amber-500/10",
+      border: "border-amber-500/30",
+      text: "text-amber-400",
+      title: "⚠️ POSSIBLE PIPE LEAKAGE — HUMAN REVIEW REQUIRED",
+      sub: "A spray-like pattern was found inside the detected pipe region. This is an unconfirmed heuristic result, not a confirmed defect."
+    };
+  } else if (leakageResult && leakageResult.status === "NO_PIPE_DETECTED") {
+    safetyResult = {
+      status: "NO_PIPE_VISIBLE",
+      color: "amber",
+      bg: "bg-amber-500/10",
+      border: "border-amber-500/30",
+      text: "text-amber-400",
+      title: "🟠 PIPE NOT VISIBLE – CHECK CAMERA POSITION",
+      sub: "The current view does not contain a verifiable pipe. No pipe leakage or pipe defect can be reported from this frame."
     };
   } else if (isPhoneDetected) {
     safetyResult = {
@@ -609,28 +627,31 @@ export default function PipeInspectionView() {
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto font-sans">
-      {/* 🚨 PROMINENT EMERGENCY LEAKAGE ALERT BANNER */}
+      {/* ⚠️ POSSIBLE LEAKAGE — HUMAN REVIEW REQUIRED (never a confirmed defect) */}
       {leakageResult && leakageResult.detected && (
-        <div className="p-4 rounded-2xl bg-red-950/90 border-2 border-red-500 text-red-100 shadow-2xl space-y-3 animate-pulse">
+        <div className="p-4 rounded-2xl bg-amber-950/90 border-2 border-amber-500 text-amber-100 shadow-2xl space-y-3">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-red-600 text-white shrink-0 animate-bounce">
+              <div className="p-2.5 rounded-xl bg-amber-600 text-white shrink-0">
                 <AlertOctagon className="w-6 h-6" />
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white uppercase tracking-wider font-mono">
-                    🚨 SAFETY ALERT
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-600 text-white uppercase tracking-wider font-mono">
+                    ⚠️ REVIEW REQUIRED
                   </span>
-                  <span className="text-xs font-mono text-red-300">
-                    STATUS: {leakageResult.status || "REVIEW REQUIRED"}
+                  <span className="text-xs font-mono text-amber-300">
+                    STATUS: {leakageResult.status || "REVIEW_REQUIRED"}
                   </span>
                 </div>
                 <h2 className="text-base sm:text-lg font-bold text-white tracking-tight mt-0.5">
-                  🔴 VISIBLE PIPE LEAKAGE DETECTED
+                  ⚠️ POSSIBLE PIPE LEAKAGE — HUMAN REVIEW REQUIRED
                 </h2>
-                <p className="text-xs text-red-200 font-mono mt-0.5">
-                  {leakageResult.details} • Confidence: <strong className="text-white font-bold">{Math.round((leakageResult.confidence || 0.94) * 100)}%</strong> • Source: <span className="text-cyan-300 font-bold">{inputMode === "image" ? "Uploaded Image" : "Live Camera"}</span>
+                <p className="text-xs text-amber-200 font-mono mt-0.5">
+                  {leakageResult.details} • Heuristic score: <strong className="text-white font-bold">{Math.round((leakageResult.confidence || 0) * 100)}%</strong> • Source: <span className="text-cyan-300 font-bold">{inputMode === "image" ? "Uploaded Image" : "Live Camera"}</span>
+                </p>
+                <p className="text-[10px] text-amber-300/80 font-mono mt-0.5">
+                  Not a trained-model detection. This alert requires operator verification and must not be treated as a confirmed defect.
                 </p>
               </div>
             </div>
@@ -673,6 +694,29 @@ export default function PipeInspectionView() {
                 <CheckCircle2 className="w-4 h-4" />
                 <span>Mark Reviewed</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🟠 NO PIPE IN VIEW — operator guidance, never a leakage claim */}
+      {leakageResult && !leakageResult.detected && leakageResult.status === "NO_PIPE_DETECTED" && (
+        <div className="p-3.5 rounded-2xl bg-amber-950/70 border border-amber-500/60 text-amber-100 shadow-lg">
+          <div className="flex items-start gap-3">
+            <div className="p-2 rounded-xl bg-amber-600/90 text-white shrink-0">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white">🟠 PIPE NOT VISIBLE – CHECK CAMERA POSITION</h3>
+              <p className="text-xs text-amber-200 font-mono mt-0.5">
+                The current view does not contain a verifiable pipe, so no pipe leakage or pipe defect can be reported.
+                Reposition the camera onto the pipe, or configure a pipeline inspection region.
+              </p>
+              {leakageResult.pipe_context?.reason && (
+                <p className="text-[10px] text-amber-300/80 font-mono mt-1">
+                  Reason: {leakageResult.pipe_context.reason}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -1061,20 +1105,26 @@ export default function PipeInspectionView() {
             <div
               className={`p-3 rounded-xl border transition-all flex items-center justify-between font-mono text-xs ${
                 leakageResult?.detected
-                  ? "bg-red-950/80 border-red-500/60 text-red-200 shadow-lg shadow-red-950/50 animate-pulse"
+                  ? "bg-amber-950/80 border-amber-500/60 text-amber-200 shadow-lg"
                   : "bg-slate-950/40 border-slate-800/40 text-slate-400"
               }`}
             >
               <div className="space-y-0.5">
                 <div className="flex items-center gap-2 font-semibold text-xs">
-                  <Droplets className={`w-4 h-4 ${leakageResult?.detected ? "text-red-400 animate-bounce" : "text-cyan-400"}`} />
-                  <span>💧 Visible Pipe Leakage</span>
+                  <Droplets className={`w-4 h-4 ${leakageResult?.detected ? "text-amber-400" : "text-cyan-400"}`} />
+                  <span>💧 Pipe Leakage (heuristic)</span>
                 </div>
                 <div className="flex items-center gap-3 text-[11px] text-slate-400">
-                  <span>Detected: <strong className={leakageResult?.detected ? "text-red-400 font-bold" : "text-slate-400"}>{leakageResult?.detected ? "YES" : "NO"}</strong></span>
+                  <span>Pipe visible: <strong className={leakageResult?.pipe_detected ? "text-emerald-400 font-bold" : "text-amber-400 font-bold"}>{leakageResult?.pipe_detected ? "YES" : "NO"}</strong></span>
+                  <span>Possible leak: <strong className={leakageResult?.detected ? "text-amber-400 font-bold" : "text-slate-400"}>{leakageResult?.detected ? "REVIEW" : "NO"}</strong></span>
                   {leakageResult?.detected && (
-                    <span>Confidence: <strong className="text-red-400">{Math.round((leakageResult.confidence || 0.94) * 100)}%</strong></span>
+                    <span>Heuristic score: <strong className="text-amber-400">{Math.round((leakageResult.confidence || 0) * 100)}%</strong></span>
                   )}
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  {leakageResult?.status === "NO_PIPE_DETECTED"
+                    ? "PIPE NOT VISIBLE – CHECK CAMERA POSITION"
+                    : "Unconfirmed heuristic; not a trained-model detection"}
                 </div>
               </div>
 
