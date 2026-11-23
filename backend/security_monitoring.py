@@ -306,11 +306,37 @@ class SecurityMonitoringService:
         return {"status": "UPDATED", "id": asset_id}
 
     def delete_asset(self, asset_id):
+        """Delete an asset only when it has no dependent history.
+
+        Assets referenced by gate passes or movement records are retained so the
+        audit trail is preserved and no orphaned rows are left behind. Retire such
+        assets with a status change instead of deleting them.
+        """
         conn = get_db_connection()
-        conn.execute("DELETE FROM asset_register WHERE id = ?", (asset_id,))
-        conn.commit()
-        conn.close()
-        return {"status": "DELETED", "id": asset_id}
+        try:
+            row = conn.execute("SELECT id FROM asset_register WHERE id = ?", (asset_id,)).fetchone()
+            if not row:
+                return {"status": "NOT_FOUND", "id": asset_id}
+            movements = conn.execute(
+                "SELECT COUNT(*) FROM asset_movements WHERE asset_id = ?", (asset_id,)
+            ).fetchone()[0]
+            gate_passes = conn.execute(
+                "SELECT COUNT(*) FROM gate_passes WHERE asset_id = ?", (asset_id,)
+            ).fetchone()[0]
+            if movements or gate_passes:
+                return {
+                    "status": "CONFLICT",
+                    "id": asset_id,
+                    "reason": "Asset has movement or gate-pass history and cannot be deleted",
+                    "movements": movements,
+                    "gate_passes": gate_passes,
+                    "resolution": "Set the asset status to RETIRED instead of deleting it.",
+                }
+            conn.execute("DELETE FROM asset_register WHERE id = ?", (asset_id,))
+            conn.commit()
+            return {"status": "DELETED", "id": asset_id}
+        finally:
+            conn.close()
 
     def verify_asset(self, rfid_tag=None, barcode=None, asset_id=None):
         """Resolve an asset from the register. AI detection alone never decides ownership."""

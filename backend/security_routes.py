@@ -160,6 +160,10 @@ def update_asset(asset_id: str, payload: dict = Body(...), user: dict = Depends(
 @router.delete("/security/assets/{asset_id}")
 def delete_asset(asset_id: str, user: dict = Depends(require_roles("admin", "operator"))):
     result = security_service.delete_asset(asset_id)
+    if result.get("status") == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if result.get("status") == "CONFLICT":
+        raise HTTPException(status_code=409, detail=result)
     audit(user=user, action="security.asset.delete", resource_type="asset", resource_id=asset_id)
     return result
 
