@@ -826,3 +826,40 @@ export async function fetchInferenceWorkersApi() {
   const res = await requestJson(`${API_BASE}/security/workers`);
   return res.ok && Array.isArray(res.data?.workers) ? res.data.workers : [];
 }
+
+// ----------------------------------------------------
+// IGL CENTRALIZED AI ARCHITECTURE API
+// ----------------------------------------------------
+export async function fetchModelHubApi() {
+  return (await requestJson(`${API_BASE}/ai/model-hub`)).data;
+}
+export async function fetchCameraCommandCenterApi() {
+  return (await requestJson(`${API_BASE}/ai/cameras`)).data;
+}
+export async function fetchModelCameraMappingApi() {
+  return (await requestJson(`${API_BASE}/ai/model-camera-mapping`)).data;
+}
+export async function fetchCentralDetectionsApi({ limit = 100, cameraId, eventType } = {}) {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (cameraId) params.set("camera_id", cameraId);
+  if (eventType) params.set("event_type", eventType);
+  const res = await requestJson(`${API_BASE}/ai/detections?${params.toString()}`);
+  return res.ok && Array.isArray(res.data) ? res.data : [];
+}
+export async function fetchCameraModeApi(cameraId) {
+  return (await requestJson(`${API_BASE}/ai/cameras/${cameraId}/mode`)).data;
+}
+export async function setCameraModeApi(cameraId, mode) {
+  return (await requestJson(`${API_BASE}/ai/cameras/${cameraId}/mode`, {
+    method: "PUT", body: JSON.stringify({ mode })
+  })).data;
+}
+export async function setCameraManualModelsApi(cameraId, modelIds) {
+  return (await requestJson(`${API_BASE}/ai/cameras/${cameraId}/manual-models`, {
+    method: "PUT", body: JSON.stringify({ model_ids: modelIds })
+  })).data;
+}
+export async function reselectCameraModelsApi(cameraId) {
+  return (await requestJson(`${API_BASE}/ai/cameras/${cameraId}/reselect`, { method: "POST" })).data;
+}

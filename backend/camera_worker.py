@@ -18,6 +18,7 @@ This module does not add new endpoints; it is wired into `camera_manager`
 start/stop and FastAPI startup/shutdown.
 """
 
+import json
 import threading
 import time
 
@@ -37,6 +38,14 @@ class CameraWorker:
         self.last_error = None
         self.frames_processed = 0
         self.last_infer_at = 0.0
+        # Live scene state surfaced to the UI (Camera Command Centre).
+        self.current_scene = "GENERAL"
+        self.scene_confidence = 0.0
+        self.scene_reason = "Scene not yet analyzed."
+        self.last_frame_at = 0.0
+        self.active_model_ids = []
+        self.scene_switch_count = 0
+        self._last_scene = "GENERAL"
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -55,23 +64,35 @@ class CameraWorker:
     def _model_ids(self):
         """Resolve which model(s) to run for this camera.
 
-        Thermal cameras are pinned to the thermal model. RGB cameras use the
-        models configured on the camera (config_json.model_ids), defaulting to
+        Delegates to the central mode manager (Automatic scene-based selection
+        or Manual operator selection). The manager enforces the hard safety
+        rules: unavailable/untrained models are never run and thermal cameras
+        are never paired with RGB models.
+
+        When the mode manager is unavailable (e.g. a unit test that builds a
+        bare worker), falls back to the camera's configured model ids and then
         the general safety model.
         """
-        import json
-
-        source_type = (self.camera.get("source_type") or "").lower()
-        if source_type in {"thermal", "thermal_rtsp"}:
-            return ["model-thermal-person"]
         try:
-            config = json.loads(self.camera.get("config_json") or "{}")
+            from mode_manager import mode_manager
+
+            return mode_manager.model_ids_for(
+                self.camera,
+                self.current_scene,
+                self.scene_confidence,
+            )
         except Exception:
-            config = {}
-        model_ids = config.get("model_ids") or []
-        if isinstance(model_ids, str):
-            model_ids = [model_ids]
-        return model_ids or ["model-yolov8n"]
+            source_type = (self.camera.get("source_type") or "").lower()
+            if source_type in {"thermal", "thermal_rtsp"}:
+                return ["model-thermal-person"]
+            try:
+                config = json.loads(self.camera.get("config_json") or "{}")
+            except Exception:
+                config = {}
+            model_ids = config.get("model_ids") or []
+            if isinstance(model_ids, str):
+                model_ids = [model_ids]
+            return model_ids or ["model-yolov8n"]
 
     def _thresholds(self):
         import json
@@ -89,7 +110,6 @@ class CameraWorker:
 
     def _run(self):
         from event_engine import event_engine
-        from inference_service import inference_service
 
         while not self._stop.is_set():
             now = time.time()
@@ -105,6 +125,7 @@ class CameraWorker:
                 time.sleep(1.0)
                 continue
             self.frames_processed += 1
+            self.last_frame_at = now
             try:
                 import cv2
 
@@ -116,7 +137,25 @@ class CameraWorker:
                 self.last_error = f"encode failed: {exc}"
                 continue
 
-            for model_id in self._model_ids():
+            # Scene-based model selection (Automatic mode) or operator selection
+            # (Manual mode) is decided centrally by the mode manager. The scene
+            # is derived from the actual frame content, never the camera name.
+            try:
+                from scene_analyzer import analyze_frame
+
+                scene = analyze_frame(image_bytes, self.camera.get("source_type"))
+                self.current_scene = scene.get("scene", self.current_scene)
+                self.scene_confidence = scene.get("confidence", 0.0)
+                self.scene_reason = scene.get("reason", "")
+                if self.current_scene != self._last_scene:
+                    self.scene_switch_count += 1
+                    self._last_scene = self.current_scene
+            except Exception as exc:
+                self.last_error = f"scene analysis failed: {exc}"
+
+            model_ids = self._model_ids()
+            self.active_model_ids = model_ids
+            for model_id in model_ids:
                 try:
                     event_engine.process_image(
                         self.camera_id,
@@ -136,6 +175,12 @@ class CameraWorker:
             "frames_processed": self.frames_processed,
             "inference_interval": self.inference_interval,
             "model_ids": self._model_ids(),
+            "active_model_ids": self.active_model_ids,
+            "scene": self.current_scene,
+            "scene_confidence": self.scene_confidence,
+            "scene_reason": self.scene_reason,
+            "scene_switch_count": self.scene_switch_count,
+            "last_frame_at": self.last_frame_at,
             "last_error": self.last_error,
         }
 

@@ -33,6 +33,11 @@ import AuditLogView from "./views/AuditLogView";
 import SettingsView from "./views/SettingsView";
 import UsersView from "./views/UsersView";
 import SecurityDashboardView from "./views/SecurityDashboardView";
+import ModelHubView from "./views/ModelHubView";
+import CameraCommandCenterView from "./views/CameraCommandCenterView";
+import ModelCameraMappingView from "./views/ModelCameraMappingView";
+import DetectionCenterView from "./views/DetectionCenterView";
+import TrainingCentreView from "./views/TrainingCentreView";
 
 function MainContent() {
   const { activeTab } = useSafety();
@@ -65,6 +70,11 @@ function MainContent() {
       {activeTab === "settings" && <SettingsView />}
       {activeTab === "users" && <UsersView />}
       {activeTab === "security" && <SecurityDashboardView />}
+      {activeTab === "model-hub" && <ModelHubView />}
+      {activeTab === "camera-command" && <CameraCommandCenterView />}
+      {activeTab === "model-camera-mapping" && <ModelCameraMappingView />}
+      {activeTab === "detections" && <DetectionCenterView />}
+      {activeTab === "training-centre" && <TrainingCentreView />}
     </main>
   );
 }

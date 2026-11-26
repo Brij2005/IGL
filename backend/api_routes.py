@@ -1312,3 +1312,118 @@ async def upload_evidence(file: UploadFile = File(...), user: dict = Depends(req
     conn.close()
     audit(user=user, action="evidence.upload", resource_type="evidence", resource_id=evidence_id)
     return {"status": "UPLOADED", "evidence_id": evidence_id, "url": f"/api/evidence/{evidence_id}"}
+
+
+# ============================================================================
+# CENTRALIZED AI ARCHITECTURE (Model Hub, Camera Command Centre, Mode control)
+# ============================================================================
+
+
+@router.get("/ai/model-hub")
+def ai_model_hub(user: dict = Depends(get_current_user)):
+    """Centralized AI Model Hub: every registered model, status, loading state,
+    versions and model-to-camera usage. Derived from real registry + live state."""
+    from orchestrator import model_hub
+
+    return model_hub()
+
+
+@router.get("/ai/cameras")
+def ai_camera_command_center(user: dict = Depends(get_current_user)):
+    """Centralized Camera Command Centre: cameras with live status, scene,
+    active models, active detections and health."""
+    from orchestrator import camera_command_center
+
+    return camera_command_center()
+
+
+@router.get("/ai/model-camera-mapping")
+def ai_model_camera_mapping(user: dict = Depends(get_current_user)):
+    """Model-to-camera mapping: which models are/would be active on each camera."""
+    from orchestrator import model_camera_mapping
+
+    return model_camera_mapping()
+
+
+@router.get("/ai/detections")
+def ai_detections(
+    limit: int = Query(100, ge=1, le=500),
+    camera_id: str = None,
+    event_type: str = None,
+    user: dict = Depends(get_current_user),
+):
+    """Centralized detections feed joining events + evidence + model names."""
+    from orchestrator import detections_feed
+
+    return detections_feed(limit=limit, camera_id=camera_id, event_type=event_type)
+
+
+@router.get("/ai/cameras/{camera_id}/mode")
+def ai_camera_mode(camera_id: str, user: dict = Depends(get_current_user)):
+    """Return a camera's current mode and its last model-selection decision."""
+    from mode_manager import mode_manager
+    from orchestrator import camera_command_center
+
+    center = camera_command_center()
+    camera = next((c for c in center["cameras"] if c["camera_id"] == camera_id), None)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return {
+        "camera_id": camera_id,
+        "mode": camera["mode"],
+        "scene": camera["scene"],
+        "scene_confidence": camera["scene_confidence"],
+        "active_model_ids": camera["active_model_ids"],
+        "decision": mode_manager.last_decision(camera_id),
+    }
+
+
+@router.put("/ai/cameras/{camera_id}/mode")
+def ai_set_camera_mode(camera_id: str, payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
+    """Switch a camera between AUTOMATIC (default) and MANUAL mode."""
+    from orchestrator import set_camera_mode
+
+    mode = (payload.get("mode") or "").upper()
+    if mode not in {"AUTOMATIC", "MANUAL"}:
+        raise HTTPException(status_code=422, detail="mode must be AUTOMATIC or MANUAL")
+    try:
+        result = set_camera_mode(camera_id, mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(user=user, action="camera.mode.set", resource_type="camera", resource_id=camera_id, details={"mode": mode})
+    return result
+
+
+@router.put("/ai/cameras/{camera_id}/manual-models")
+def ai_set_camera_manual_models(camera_id: str, payload: dict = Body(...), user: dict = Depends(require_roles("admin", "operator"))):
+    """Pin an explicit manual model list for a camera (switches to MANUAL mode).
+
+    Unavailable/untrained/incompatible models are still filtered at run time by
+    the mode manager, so pinning an untrained model never starts it.
+    """
+    from orchestrator import set_camera_manual_models
+
+    model_ids = payload.get("model_ids")
+    if not isinstance(model_ids, list):
+        raise HTTPException(status_code=422, detail="model_ids must be a list")
+    try:
+        result = set_camera_manual_models(camera_id, model_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(user=user, action="camera.manual_models.set", resource_type="camera", resource_id=camera_id, details={"model_ids": model_ids})
+    return result
+
+
+@router.post("/ai/cameras/{camera_id}/reselect")
+def ai_camera_reselect(camera_id: str, user: dict = Depends(require_roles("admin", "operator"))):
+    """Force an immediate model re-evaluation for a camera (clears hysteresis)."""
+    from mode_manager import mode_manager
+
+    conn = get_db_connection()
+    row = conn.execute("SELECT * FROM cameras WHERE id = ?", (camera_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    mode_manager.reset(camera_id)
+    audit(user=user, action="camera.reselect", resource_type="camera", resource_id=camera_id)
+    return {"status": "RESELECT_PENDING", "camera_id": camera_id}

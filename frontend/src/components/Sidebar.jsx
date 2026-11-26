@@ -24,7 +24,10 @@ import {
   HeartPulse,
   ScrollText,
   Wrench,
-  DoorOpen
+  DoorOpen,
+  LayoutDashboard,
+  ScanSearch,
+  GraduationCap
 } from "lucide-react";
 import { useSafety } from "../context/SafetyContext";
 
@@ -37,6 +40,11 @@ export default function Sidebar() {
   const navItems = [
     { id: "dashboard", label: "Overview", icon: Home },
     { id: "security", label: "Smart Entry & Exit", icon: DoorOpen, badge: "NEW" },
+    { id: "model-hub", label: "AI Model Hub", icon: Cpu, badge: "NEW" },
+    { id: "camera-command", label: "Camera Command Centre", icon: LayoutDashboard, badge: "NEW" },
+    { id: "model-camera-mapping", label: "Model-to-Camera Mapping", icon: ScanSearch },
+    { id: "detections", label: "Detection & Alerts", icon: ScanSearch },
+    { id: "training-centre", label: "Model Training Centre", icon: GraduationCap },
     { id: "camera-input", label: "Camera Setup", icon: Camera, badge: stats.cameras_online > 0 ? "LIVE" : null },
     { id: "live-monitoring", label: "Live Monitoring", icon: Tv },
     { id: "expected-personnel", label: "Expected Personnel", icon: UserCheck, badge: unknownAlerts > 0 ? unknownAlerts : "ALERT" },
